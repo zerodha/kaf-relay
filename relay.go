@@ -44,34 +44,28 @@ Loop:
 					continue
 				}
 
-				//log.Printf("record remapped topic: %v -> %v; offset %v; key %v\n", rec.Topic, t, rec.Offset, string(rec.Key))
-
 				forward := &kgo.Record{
-					Key:   rec.Key,
-					Value: rec.Value,
-					Topic: t, // remap destination topic
+					Key:       rec.Key,
+					Value:     rec.Value,
+					Topic:     t, // remap destination topic
+					Partition: rec.Partition,
 				}
 
-				// manual balancer - assign partition manually
-				if r.producer.manualBalancer {
-					forward.Partition = rec.Partition
-				}
-
-				// TODO: Channel? async works there is a batching behind the scenes?
+				// Async producer which internally batches the messages as per producer `batch_size`
 				r.producer.client.Produce(ctx, forward, func(r *kgo.Record, err error) {
 					if err != nil {
 						log.Printf("error producing message: %v", err)
 					}
-
-					//log.Printf("pushed message: topic %v; offset %v\n", r.Topic, r.Offset)
 				})
 
+				// Mark / commit offsets
 				r.consumer.commit(ctx, rec)
 			}
 		}
 	}
 }
 
+// validateOffsets makes sure that source, destination has same topic, partitions.
 func (r *relay) validateOffsets(ctx context.Context) {
 	var (
 		consTopics []string

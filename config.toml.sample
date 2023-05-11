@@ -23,4 +23,4 @@ flush_frequency = "20ms"
 session_timeout = "6s"
 batch_size = 1000
 max_message_bytes = 10000000
-partition_strategy = "manual"
+sasl_mechanism = "PLAIN" # PLAIN/SCRAM-SHA-256/SCRAM-SHA-512
