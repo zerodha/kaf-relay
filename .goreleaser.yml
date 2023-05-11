@@ -6,7 +6,7 @@ before:
   - make dist
 
 builds:
-  - binary: relay.bin
+  - binary: kaf-relay.bin
     main: .
     goos:
       - windows
