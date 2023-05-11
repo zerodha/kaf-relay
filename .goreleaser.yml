@@ -1,0 +1,25 @@
+env:
+  - CGO_ENABLED=0
+
+before:
+  hooks:
+  - make dist
+
+builds:
+  - binary: relay.bin
+    main: .
+    goos:
+      - windows
+      - darwin
+      - linux
+      - freebsd
+      - openbsd
+      - netbsd
+    goarch:
+      - amd64
+
+archives:
+  - format: tar.gz
+    files:
+      - README.md
+      - LICENSE
