@@ -2,10 +2,17 @@ package main
 
 import (
 	"context"
+	"fmt"
+	"io"
 	"log"
 
+	"github.com/VictoriaMetrics/metrics"
 	"github.com/twmb/franz-go/pkg/kadm"
 	"github.com/twmb/franz-go/pkg/kgo"
+)
+
+var (
+	RelayMetric = "kafka_relay_msg_count{source=\"%s\", destination=\"%s\", partition=\"%d\"}"
 )
 
 // relay represents the input, output kafka and the remapping necessary to forward messages from one topic to another.
@@ -13,7 +20,8 @@ type relay struct {
 	consumer consumer
 	producer producer
 
-	topics map[string]string
+	topics  map[string]string
+	metrics *metrics.Set
 }
 
 // Start starts the consumer loop on kafka (A), fetch messages and relays over to kafka (B) using an async producer.
@@ -51,6 +59,8 @@ Loop:
 					Partition: rec.Partition,
 				}
 
+				r.metrics.GetOrCreateCounter(fmt.Sprintf(RelayMetric, rec.Topic, t, rec.Partition)).Inc()
+
 				// Async producer which internally batches the messages as per producer `batch_size`
 				r.producer.client.Produce(ctx, forward, func(r *kgo.Record, err error) {
 					if err != nil {
@@ -63,6 +73,10 @@ Loop:
 			}
 		}
 	}
+}
+
+func (r *relay) getMetrics(buf io.Writer) {
+	r.metrics.WritePrometheus(buf)
 }
 
 // validateOffsets makes sure that source, destination has same topic, partitions.

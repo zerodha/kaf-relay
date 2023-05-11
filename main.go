@@ -1,13 +1,17 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"log"
+	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
+	"github.com/VictoriaMetrics/metrics"
 	"github.com/knadh/koanf/parsers/toml"
 	"github.com/knadh/koanf/providers/file"
 	"github.com/knadh/koanf/v2"
@@ -92,12 +96,41 @@ func main() {
 		consumer: c,
 		producer: p,
 		topics:   cfg.Topics,
+		metrics:  metrics.NewSet(),
 	}
+
+	// Start metrics handler
+	mux := http.NewServeMux()
+	mux.HandleFunc("/metrics", func(w http.ResponseWriter, r *http.Request) {
+		buf := new(bytes.Buffer)
+		relay.getMetrics(buf)
+
+		w.Header().Set("Content-Type", "text/plain")
+		w.WriteHeader(http.StatusOK)
+		buf.WriteTo(w)
+	})
+
+	srv := http.Server{
+		Addr:         ":7081",
+		Handler:      mux,
+		ReadTimeout:  10 * time.Second,
+		WriteTimeout: 10 * time.Second,
+	}
+
+	go func() {
+		err := srv.ListenAndServe()
+		if err != nil && err != http.ErrServerClosed {
+			log.Printf("error starting server: %v", err)
+		}
+	}()
 
 	// Start forwarder daemon
 	relay.Start(ctx)
 
 	// TODO: Ability to end this loop when you reach end of offset? otherwise run foreva
+
+	// shutdown server
+	srv.Shutdown(ctx)
 
 	// cleanup
 	c.client.Close()

@@ -12,6 +12,7 @@ require (
 )
 
 require (
+	github.com/VictoriaMetrics/metrics v1.23.1 // indirect
 	github.com/fsnotify/fsnotify v1.6.0 // indirect
 	github.com/klauspost/compress v1.16.5 // indirect
 	github.com/knadh/koanf/maps v0.1.1 // indirect
@@ -21,6 +22,8 @@ require (
 	github.com/pelletier/go-toml v1.9.5 // indirect
 	github.com/pierrec/lz4/v4 v4.1.17 // indirect
 	github.com/twmb/franz-go/pkg/kadm v1.8.1 // indirect
+	github.com/valyala/fastrand v1.1.0 // indirect
+	github.com/valyala/histogram v1.2.0 // indirect
 	golang.org/x/crypto v0.9.0 // indirect
 	golang.org/x/sys v0.8.0 // indirect
 )
