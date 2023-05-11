@@ -1,12 +1,34 @@
 package main
 
 import (
+	"context"
+
 	"github.com/twmb/franz-go/pkg/kgo"
 	"github.com/twmb/franz-go/pkg/sasl/plain"
 )
 
 type consumer struct {
 	client *kgo.Client
+
+	cfg ConsumerGroupConfig
+}
+
+func (c *consumer) commit(ctx context.Context, r *kgo.Record) {
+	// If autocommit is disabled allow committing directly,
+	// or else just mark the message to commit.
+	if c.cfg.OffsetCommitInterval == 0 {
+		oMap := make(map[int32]kgo.EpochOffset)
+		oMap[r.Partition] = kgo.EpochOffset{
+			Epoch:  r.LeaderEpoch,
+			Offset: r.Offset,
+		}
+		tOMap := make(map[string]map[int32]kgo.EpochOffset)
+		tOMap[r.Topic] = oMap
+		c.client.CommitOffsets(ctx, tOMap, nil)
+		return
+	}
+
+	c.client.MarkCommitRecords(r)
 }
 
 func initConsumer(cfg ConsumerGroupConfig) (consumer, error) {
@@ -54,7 +76,7 @@ func initConsumer(cfg ConsumerGroupConfig) (consumer, error) {
 		return consumer{}, err
 	}
 
-	return consumer{client: client}, nil
+	return consumer{client: client, cfg: cfg}, nil
 }
 
 type producer struct {

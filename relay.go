@@ -65,6 +65,8 @@ Loop:
 
 					//log.Printf("pushed message: topic %v; offset %v\n", r.Topic, r.Offset)
 				})
+
+				r.consumer.commit(ctx, rec)
 			}
 		}
 	}
