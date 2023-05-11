@@ -1,9 +1,10 @@
 [consumer]
-servers = ["localhost:9092"]
+servers = ["node1:9092"]
 session_timeout = "6s"
-auth_enabled = false
-username = ""
-password = ""
+auth_enabled = true
+sasl_mechanism = "PLAIN"
+username = "user-x"
+password = "pass-x"
 max_wait_time = "10ms"
 # To not commit offsets, set this to 0.
 offset_commit_interval = "100ms"
@@ -11,16 +12,16 @@ initial_offset = "start"
 group_id = "relay_group"
 
 [topics]
-topic_a = "backup_topic_a"
+topicA = "machineX_topicA"
 
 [producer]
-servers = ["localhost:9092"]
-auth_enabled = false
-username = ""
-password = ""
+servers = ["node2:9092"]
+auth_enabled = true
+sasl_mechanism = "PLAIN" # PLAIN/SCRAM-SHA-256/SCRAM-SHA-512
+username = "user-y"
+password = "pass-y"
 max_retries = 3
 flush_frequency = "20ms"
 session_timeout = "6s"
 batch_size = 1000
 max_message_bytes = 10000000
-sasl_mechanism = "PLAIN" # PLAIN/SCRAM-SHA-256/SCRAM-SHA-512
