@@ -2,6 +2,12 @@ package main
 
 import "time"
 
+const (
+	SASLMechanismPlain       = "PLAIN"
+	SASLMechanismScramSHA256 = "SCRAM-SHA-256"
+	SASLMechanismScramSHA512 = "SCRAM-SHA-512"
+)
+
 type Config struct {
 	Consumer ConsumerGroupConfig `koanf:"consumer"`
 	Producer ProducerConfig      `koanf:"producer"`
@@ -15,9 +21,11 @@ type ClientConfig struct {
 	SessionTimeout   time.Duration `koanf:"session_timeout"`
 
 	// Auth.
-	Username   string `koanf:"username"`
-	Password   string `koanf:"password"`
-	EnableAuth bool   `koanf:"auth_enabled"`
+	EnableAuth bool `koanf:"auth_enabled"`
+	// PLAIN/SCRAM-SHA-256/SCRAM-SHA-512
+	SASLMechanism string `koanf:"sasl_mechanism"`
+	Username      string `koanf:"username"`
+	Password      string `koanf:"password"`
 }
 
 // ConsumerGroupConfig is the consumer group specific config.
@@ -38,10 +46,9 @@ type ProducerConfig struct {
 	// disabling idempotent produce requests allows TCPAck/LeaderAck
 	EnableIdempotency bool `koanf:"enable_idempotency"`
 	// required acks
-	CommitAck           string        `koanf:"commit_ack_type"`    // tcp/leader/cluster/default
-	PartitionerStrategy string        `koanf:"partition_strategy"` // manual
-	MaxRetries          int           `koanf:"max_retries"`
-	FlushFrequency      time.Duration `koanf:"flush_frequency"`
+	CommitAck      string        `koanf:"commit_ack_type"` // tcp/leader/cluster/default
+	MaxRetries     int           `koanf:"max_retries"`
+	FlushFrequency time.Duration `koanf:"flush_frequency"`
 	// Upper bound of max message bytes to produce
 	MaxMessageBytes int `koanf:"max_message_bytes"`
 	// Buffer produce messages

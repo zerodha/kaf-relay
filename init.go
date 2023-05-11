@@ -5,6 +5,7 @@ import (
 
 	"github.com/twmb/franz-go/pkg/kgo"
 	"github.com/twmb/franz-go/pkg/sasl/plain"
+	"github.com/twmb/franz-go/pkg/sasl/scram"
 )
 
 type consumer struct {
@@ -56,14 +57,9 @@ func initConsumer(cfg ConsumerGroupConfig) (consumer, error) {
 		opts = append(opts, kgo.AutoCommitMarks())
 	}
 
-	// TODO: Add other auths
+	// Add authentication
 	if cfg.EnableAuth {
-		p := plain.Auth{
-			User: cfg.Username,
-			Pass: cfg.Password,
-		}
-		sasl := kgo.SASL(p.AsMechanism())
-		opts = append(opts, sasl)
+		opts = appendSASL(opts, cfg.ClientConfig)
 	}
 
 	client, err := kgo.NewClient(opts...)
@@ -80,8 +76,7 @@ func initConsumer(cfg ConsumerGroupConfig) (consumer, error) {
 }
 
 type producer struct {
-	manualBalancer bool
-	client         *kgo.Client
+	client *kgo.Client
 }
 
 func initProducer(cfg ProducerConfig) (producer, error) {
@@ -102,20 +97,13 @@ func initProducer(cfg ProducerConfig) (producer, error) {
 		opts = append(opts, kgo.DisableIdempotentWrite())
 	}
 
-	switch cfg.PartitionerStrategy {
-	case "manual":
-		opts = append(opts, kgo.RecordPartitioner(kgo.ManualPartitioner()))
-		prod.manualBalancer = true
+	opts = append(opts, kgo.RecordPartitioner(kgo.ManualPartitioner()))
+
+	// Add authentication
+	if cfg.EnableAuth {
+		opts = appendSASL(opts, cfg.ClientConfig)
 	}
 
-	if cfg.EnableAuth {
-		p := plain.Auth{
-			User: cfg.Username,
-			Pass: cfg.Password,
-		}
-		sasl := kgo.SASL(p.AsMechanism())
-		opts = append(opts, sasl)
-	}
 	client, err := kgo.NewClient(opts...)
 	if err != nil {
 		return producer{}, err
@@ -134,4 +122,30 @@ func initProducer(cfg ProducerConfig) (producer, error) {
 
 	prod.client = client
 	return prod, nil
+}
+
+func appendSASL(opts []kgo.Opt, cfg ClientConfig) []kgo.Opt {
+	switch m := cfg.SASLMechanism; m {
+	case SASLMechanismPlain:
+		p := plain.Auth{
+			User: cfg.Username,
+			Pass: cfg.Password,
+		}
+		opts = append(opts, kgo.SASL(p.AsMechanism()))
+
+	case SASLMechanismScramSHA256, SASLMechanismScramSHA512:
+		p := scram.Auth{
+			User: cfg.Username,
+			Pass: cfg.Password,
+		}
+
+		mech := p.AsSha256Mechanism()
+		if m == SASLMechanismScramSHA512 {
+			mech = p.AsSha512Mechanism()
+		}
+
+		opts = append(opts, kgo.SASL(mech))
+	}
+
+	return opts
 }
