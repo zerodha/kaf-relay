@@ -4,7 +4,7 @@ LAST_COMMIT_DATE := $(shell git show -s --format=%ci ${LAST_COMMIT})
 VERSION := $(shell git describe --tags)
 BUILDSTR := ${VERSION} (Commit: ${LAST_COMMIT_DATE} (${LAST_COMMIT}), Build: $(shell date +"%Y-%m-%d% %H:%M:%S %z"))
 
-BIN := relay.bin
+BIN := kaf-relay.bin
 DIST := dist
 
 .PHONY: dist
