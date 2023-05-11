@@ -56,14 +56,9 @@ func main() {
 		log.Fatalf("error marshalling application config: %v", err)
 	}
 
-	if err := ko.UnmarshalWithConf("consumer", &cfg.Consumer, koanf.UnmarshalConf{}); err != nil {
-		log.Fatalf("error unmarshalling consumer config: %v", err)
-	}
+	// Unmarshall embedded structs
 	if err := ko.UnmarshalWithConf("consumer", &cfg.Consumer.ClientConfig, koanf.UnmarshalConf{}); err != nil {
 		log.Fatalf("error unmarshalling consumer config: %v", err)
-	}
-	if err := ko.UnmarshalWithConf("producer", &cfg.Producer, koanf.UnmarshalConf{}); err != nil {
-		log.Fatalf("error unmarshalling producer config: %v", err)
 	}
 	if err := ko.UnmarshalWithConf("producer", &cfg.Producer.ClientConfig, koanf.UnmarshalConf{}); err != nil {
 		log.Fatalf("error unmarshalling producer config: %v", err)
@@ -126,8 +121,6 @@ func main() {
 
 	// Start forwarder daemon
 	relay.Start(ctx)
-
-	// TODO: Ability to end this loop when you reach end of offset? otherwise run foreva
 
 	// shutdown server
 	srv.Shutdown(ctx)
