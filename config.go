@@ -30,7 +30,7 @@ type ClientConfig struct {
 
 // ConsumerGroupConfig is the consumer group specific config.
 type ConsumerGroupConfig struct {
-	ClientConfig `koanf:"client"`
+	ClientConfig `koanf:",squash"`
 
 	GroupID              string        `koanf:"group_id"`
 	Offset               string        `koanf:"offset"` // start/end
@@ -41,7 +41,7 @@ type ConsumerGroupConfig struct {
 
 // ProducerConfig is the producer specific config.
 type ProducerConfig struct {
-	ClientConfig `koanf:"client"`
+	ClientConfig `koanf:",squash"`
 
 	// disabling idempotent produce requests allows TCPAck/LeaderAck
 	EnableIdempotency bool `koanf:"enable_idempotency"`
