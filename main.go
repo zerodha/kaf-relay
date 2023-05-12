@@ -56,14 +56,6 @@ func main() {
 		log.Fatalf("error marshalling application config: %v", err)
 	}
 
-	// Unmarshall embedded structs
-	if err := ko.UnmarshalWithConf("consumer", &cfg.Consumer.ClientConfig, koanf.UnmarshalConf{}); err != nil {
-		log.Fatalf("error unmarshalling consumer config: %v", err)
-	}
-	if err := ko.UnmarshalWithConf("producer", &cfg.Producer.ClientConfig, koanf.UnmarshalConf{}); err != nil {
-		log.Fatalf("error unmarshalling producer config: %v", err)
-	}
-
 	// Assign topic mapping
 	var topics []string
 	for t := range cfg.Topics {
