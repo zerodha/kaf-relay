@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"log"
 
 	"github.com/twmb/franz-go/pkg/kgo"
 	"github.com/twmb/franz-go/pkg/sasl/plain"
@@ -21,24 +22,33 @@ func (c *consumer) commit(ctx context.Context, r *kgo.Record) {
 		oMap := make(map[int32]kgo.EpochOffset)
 		oMap[r.Partition] = kgo.EpochOffset{
 			Epoch:  r.LeaderEpoch,
-			Offset: r.Offset,
+			Offset: r.Offset + 1,
 		}
 		tOMap := make(map[string]map[int32]kgo.EpochOffset)
 		tOMap[r.Topic] = oMap
-		c.client.CommitOffsets(ctx, tOMap, nil)
+		c.client.CommitOffsetsSync(ctx, tOMap, nil)
 		return
 	}
 
 	c.client.MarkCommitRecords(r)
 }
 
-func initConsumer(cfg ConsumerGroupConfig) (consumer, error) {
+func initConsumer(ctx context.Context, cfg ConsumerGroupConfig) (consumer, error) {
 	opts := []kgo.Opt{
 		kgo.SeedBrokers(cfg.BootstrapBrokers...),
 		kgo.FetchMaxWait(cfg.MaxWaitTime),
 		kgo.ConsumeTopics(cfg.Topics...),
 		kgo.ConsumerGroup(cfg.GroupID),
 		kgo.SessionTimeout(cfg.SessionTimeout),
+		kgo.OnPartitionsRevoked(func(ctx context.Context, c *kgo.Client, m map[string][]int32) {
+			// on close triggers this callback, use this to commit the marked offsets before exiting.
+			nCtx, cancel := context.WithTimeout(ctx, cfg.SessionTimeout)
+			defer cancel()
+
+			if err := c.CommitMarkedOffsets(nCtx); err != nil {
+				log.Printf("error committing marked offsets: %v", err)
+			}
+		}),
 	}
 
 	// TODO: Add relative offsets
