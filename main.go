@@ -65,7 +65,11 @@ func main() {
 	cfg.Consumer.Topics = topics
 	cfg.Producer.Topics = cfg.Topics
 
-	c, err := initConsumer(cfg.Consumer)
+	// Create context with interrupts signals
+	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer cancel()
+
+	c, err := initConsumer(ctx, cfg.Consumer)
 	if err != nil {
 		log.Fatalf("error starting consumer: %v", err)
 	}
@@ -74,10 +78,6 @@ func main() {
 	if err != nil {
 		log.Fatalf("error starting producer: %v", err)
 	}
-
-	// Create context with interrupts signals
-	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer cancel()
 
 	relay := relay{
 		consumer: c,
