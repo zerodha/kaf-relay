@@ -1,13 +1,13 @@
 module github.com/joeirimpan/kaf-relay
 
-go 1.20
+go 1.21
 
 require (
 	github.com/knadh/koanf/parsers/toml v0.1.0
 	github.com/knadh/koanf/providers/file v0.1.0
 	github.com/knadh/koanf/v2 v2.0.1
 	github.com/spf13/pflag v1.0.5
-	github.com/twmb/franz-go v1.14.1
+	github.com/twmb/franz-go v1.14.4
 	github.com/twmb/franz-go/pkg/kmsg v1.6.1
 )
 
