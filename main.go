@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
@@ -84,6 +85,7 @@ func main() {
 		producer: p,
 		topics:   cfg.Topics,
 		metrics:  metrics.NewSet(),
+		logger:   slog.New(slog.NewJSONHandler(os.Stdout, nil)),
 	}
 
 	// Start metrics handler
@@ -112,7 +114,9 @@ func main() {
 	}()
 
 	// Start forwarder daemon
-	relay.Start(ctx)
+	if err := relay.Start(ctx); err != nil {
+		relay.logger.Error("error starting relay", err)
+	}
 
 	// shutdown server
 	srv.Shutdown(ctx)
