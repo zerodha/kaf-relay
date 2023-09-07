@@ -2,9 +2,11 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
+	"time"
 
 	"github.com/VictoriaMetrics/metrics"
 	"github.com/twmb/franz-go/pkg/kadm"
@@ -17,12 +19,17 @@ var (
 
 // relay represents the input, output kafka and the remapping necessary to forward messages from one topic to another.
 type relay struct {
-	consumer consumer
-	producer producer
+	consumerMgr *consumerManager
+	producer    *producer
 
 	topics  map[string]string
 	metrics *metrics.Set
 	logger  *slog.Logger
+
+	// retry
+	retryBackoffFn func(int) time.Duration
+	maxRetries     int
+	retries        int
 }
 
 // Start starts the consumer loop on kafka (A), fetch messages and relays over to kafka (B) using an async producer.
@@ -31,19 +38,58 @@ func (r *relay) Start(ctx context.Context) error {
 		return err
 	}
 
-Loop:
+pollLoop:
 	for {
+		// exit if max retries is exhausted
+		if r.retries >= r.maxRetries {
+			return fmt.Errorf("`max_retries`(%d) exhausted; exiting relay", r.maxRetries)
+		}
+
 		select {
 		case <-ctx.Done():
-			break Loop
+			break pollLoop
 		default:
-			fetches := r.consumer.client.PollFetches(ctx)
+			// get consumer specific context, client
+			r.consumerMgr.Lock()
+			childCtx, _ := r.consumerMgr.getCurrentContext()
+			cl := r.consumerMgr.getCurrentClient()
+			r.consumerMgr.Unlock()
+
+			r.logger.Debug("polling active consumer", "broker", cl.OptValue(kgo.SeedBrokers))
+			fetches := cl.PollFetches(childCtx)
+
+			if fetches.IsClientClosed() {
+				r.retries++
+				waitTries(ctx, r.retryBackoffFn(r.retries))
+
+				r.logger.Debug("consumer group fetch client closed")
+				continue pollLoop
+			}
 
 			// Proxy fetch errors into error callback function
-			errors := fetches.Errors()
-			for _, err := range errors {
-				r.logger.Error("error while consuming", err.Err)
+			errs := fetches.Errors()
+			for _, err := range errs {
+				if errors.Is(err.Err, kgo.ErrClientClosed) {
+					r.retries++
+					waitTries(ctx, r.retryBackoffFn(r.retries))
+
+					r.logger.Debug("consumer group fetch error client closed", "broker", cl.OptValue(kgo.SeedBrokers))
+					continue pollLoop
+				}
+
+				if errors.Is(err.Err, context.Canceled) {
+					r.retries++
+					waitTries(ctx, r.retryBackoffFn(r.retries))
+
+					r.logger.Debug("consumer group fetch error client context cancelled", "broker", cl.OptValue(kgo.SeedBrokers))
+					continue pollLoop
+				}
+
+				r.logger.Error("error while consuming", "err", err.Err)
 			}
+
+			// reset max retries if successfull
+			r.retries = 0
 
 			iter := fetches.RecordIter()
 			for !iter.Done() {
@@ -55,7 +101,7 @@ Loop:
 					continue
 				}
 
-				forward := &kgo.Record{
+				msg := &kgo.Record{
 					Key:       rec.Key,
 					Value:     rec.Value,
 					Topic:     t, // remap destination topic
@@ -64,15 +110,18 @@ Loop:
 
 				r.metrics.GetOrCreateCounter(fmt.Sprintf(RelayMetric, rec.Topic, t, rec.Partition)).Inc()
 
-				// Async producer which internally batches the messages as per producer `batch_size`
-				r.producer.client.Produce(ctx, forward, func(rec *kgo.Record, err error) {
-					if err != nil {
-						r.logger.Error("error producing message", err)
-					}
-				})
+				r.logger.Debug("producing message", "broker", r.producer.client.OptValue(kgo.SeedBrokers), "msg", msg)
 
-				// Mark / commit offsets
-				r.consumer.commit(ctx, rec)
+				// Async producer which internally batches the messages as per producer `batch_size`
+				r.producer.client.Produce(ctx, msg, func(rec *kgo.Record, err error) {
+					if err != nil {
+						r.logger.Error("error producing message", "err", err)
+						return
+					}
+
+					// Mark / commit offsets
+					r.consumerMgr.commit(rec)
+				})
 			}
 		}
 	}
@@ -80,6 +129,7 @@ Loop:
 	return nil
 }
 
+// getMetrics writes the internal prom metrics to the given io.Writer
 func (r *relay) getMetrics(buf io.Writer) {
 	r.metrics.WritePrometheus(buf)
 }
@@ -95,7 +145,11 @@ func (r *relay) validateOffsets(ctx context.Context) error {
 		prodTopics = append(prodTopics, p)
 	}
 
-	consOffsets, err := getEndOffsets(ctx, r.consumer.client, consTopics)
+	r.consumerMgr.Lock()
+	c := r.consumerMgr.getCurrentClient()
+	r.consumerMgr.Unlock()
+
+	consOffsets, err := getEndOffsets(ctx, c, consTopics)
 	if err != nil {
 		return err
 	}
@@ -104,7 +158,7 @@ func (r *relay) validateOffsets(ctx context.Context) error {
 		return err
 	}
 
-	commitOffsets, err := getCommittedOffsets(ctx, r.consumer.client, consTopics)
+	commitOffsets, err := getCommittedOffsets(ctx, c, consTopics)
 	if err != nil {
 		return err
 	}
@@ -131,7 +185,7 @@ func (r *relay) validateOffsets(ctx context.Context) error {
 				}
 
 				if destOffset.Offset > o.Offset {
-					return fmt.Errorf("destination topic(%v), partition(%v) offsets(%v) is higher than consumer group committed offsets(%v).",
+					return fmt.Errorf("destination topic(%v), partition(%v) offsets(%v) is higher than consumer group committed offsets(%v)",
 						destOffset.Topic, destOffset.Partition, destOffset.Offset, o.Offset)
 				}
 			}

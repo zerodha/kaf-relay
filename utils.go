@@ -2,12 +2,21 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"fmt"
+	"math/rand"
+	"net"
+	"os"
+	"sync"
+	"syscall"
 	"time"
 
 	"github.com/twmb/franz-go/pkg/kerr"
 	"github.com/twmb/franz-go/pkg/kgo"
 	"github.com/twmb/franz-go/pkg/kmsg"
+	"github.com/twmb/franz-go/pkg/sasl/plain"
+	"github.com/twmb/franz-go/pkg/sasl/scram"
 )
 
 func getCompressionCodec(codec string) kgo.CompressionCodec {
@@ -79,4 +88,129 @@ func testConnection(client *kgo.Client, timeout time.Duration, topics []string) 
 	client.ForceMetadataRefresh()
 
 	return nil
+}
+
+func createTLSConfig(ca, cl, key string) (kgo.Opt, error) {
+	// Load the CA certificate
+	caCert, err := os.ReadFile(ca)
+	if err != nil {
+		return nil, err
+	}
+
+	// Load the client certificate and key
+	clientCert, err := tls.LoadX509KeyPair(cl, key)
+	if err != nil {
+		return nil, err
+	}
+
+	// Load CA certificate into a certificate pool
+	caCertPool := x509.NewCertPool()
+	caCertPool.AppendCertsFromPEM(caCert)
+
+	// Set up TLS configuration
+	return kgo.DialTLSConfig(&tls.Config{
+		RootCAs:      caCertPool,
+		Certificates: []tls.Certificate{clientCert},
+	}), nil
+}
+
+func appendSASL(opts []kgo.Opt, cfg ClientCfg) []kgo.Opt {
+	switch m := cfg.SASLMechanism; m {
+	case SASLMechanismPlain:
+		p := plain.Auth{
+			User: cfg.Username,
+			Pass: cfg.Password,
+		}
+		opts = append(opts, kgo.SASL(p.AsMechanism()))
+
+	case SASLMechanismScramSHA256, SASLMechanismScramSHA512:
+		p := scram.Auth{
+			User: cfg.Username,
+			Pass: cfg.Password,
+		}
+
+		mech := p.AsSha256Mechanism()
+		if m == SASLMechanismScramSHA512 {
+			mech = p.AsSha512Mechanism()
+		}
+
+		opts = append(opts, kgo.SASL(mech))
+	}
+
+	return opts
+}
+
+func inSlice(x string, l []string) bool {
+	for _, i := range l {
+		if i == x {
+			return true
+		}
+	}
+
+	return false
+}
+
+func checkErr(err error) bool {
+	if netError, ok := err.(net.Error); ok && netError.Timeout() {
+		return true
+	}
+
+	switch t := err.(type) {
+	case *net.OpError:
+		if t.Op == "dial" {
+			return true
+		} else if t.Op == "read" {
+			return true
+		}
+
+	case syscall.Errno:
+		if t == syscall.ECONNREFUSED {
+			return true
+		}
+	}
+
+	return false
+}
+
+// retryBackoff is basic backoff fn from franz-go
+// ref: https://github.com/twmb/franz-go/blob/01651affd204d4a3577a341e748c5d09b52587f8/pkg/kgo/config.go#L450
+func retryBackoff() func(int) time.Duration {
+	var rngMu sync.Mutex
+	rng := rand.New(rand.NewSource(time.Now().UnixNano()))
+	return func(fails int) time.Duration {
+		const (
+			min = 250 * time.Millisecond
+			max = 5 * time.Second / 2
+		)
+		if fails <= 0 {
+			return min
+		}
+		if fails > 10 {
+			return max
+		}
+
+		backoff := min * time.Duration(1<<(fails-1))
+
+		rngMu.Lock()
+		jitter := 0.8 + 0.4*rng.Float64()
+		rngMu.Unlock()
+
+		backoff = time.Duration(float64(backoff) * jitter)
+
+		if backoff > max {
+			return max
+		}
+		return backoff
+	}
+}
+
+// waitTries waits for the timer to hit for the deadline with the backoff duration
+func waitTries(ctx context.Context, b time.Duration) {
+	deadline := time.Now().Add(b)
+	after := time.NewTimer(time.Until(deadline))
+	select {
+	case <-ctx.Done():
+		return
+	case <-after.C:
+	}
 }
