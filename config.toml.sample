@@ -1,7 +1,12 @@
-[consumer]
+[app]
+log_level = "debug"
+metrics_server_addr = ":7081"
+
+[[consumers]]
+name = "node1"
 servers = ["node1:9092"]
 session_timeout = "6s"
-auth_enabled = true
+enable_auth = true
 sasl_mechanism = "PLAIN"
 username = "user-x"
 password = "pass-x"
@@ -9,14 +14,39 @@ max_wait_time = "10ms"
 # To not commit offsets, set this to 0.
 offset_commit_interval = "100ms"
 initial_offset = "start"
-group_id = "relay_group"
+group_id = "relay_group1"
+
+enable_tls = false
+client_key_path = ""
+client_cert_path = ""
+ca_cert_path = ""
+
+[[consumers]]
+name = "node2"
+servers = ["node2:9092"]
+session_timeout = "6s"
+enable_auth = true
+sasl_mechanism = "PLAIN"
+username = "user-x"
+password = "pass-x"
+max_wait_time = "10ms"
+# To not commit offsets, set this to 0.
+offset_commit_interval = "100ms"
+initial_offset = "start"
+group_id = "relay_group2"
+
+enable_tls = false
+client_key_path = ""
+client_cert_path = ""
+ca_cert_path = ""
 
 [topics]
 topicA = "machineX_topicA"
 
 [producer]
-servers = ["node2:9092"]
-auth_enabled = true
+name = "node3"
+servers = ["node3:9092"]
+enable_auth = true
 sasl_mechanism = "PLAIN" # PLAIN/SCRAM-SHA-256/SCRAM-SHA-512
 username = "user-y"
 password = "pass-y"
@@ -25,3 +55,8 @@ flush_frequency = "20ms"
 session_timeout = "6s"
 batch_size = 1000
 max_message_bytes = 10000000
+
+enable_tls = false
+client_key_path = ""
+client_cert_path = ""
+ca_cert_path = ""

@@ -63,29 +63,43 @@ func main() {
 		topics = append(topics, t)
 	}
 
-	cfg.Consumer.Topics = topics
+	// Set consumer topics
+	for i := 0; i < len(cfg.Consumers); i++ {
+		cfg.Consumers[i].Topics = topics
+	}
 	cfg.Producer.Topics = cfg.Topics
 
 	// Create context with interrupts signals
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
-	c, err := initConsumer(ctx, cfg.Consumer)
+	// setup logger
+	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
+		AddSource: false,
+		Level:     cfg.App.LogLevel,
+	}))
+
+	// setup consumer
+	m, err := initConsumer(ctx, cfg.Consumers, logger)
 	if err != nil {
 		log.Fatalf("error starting consumer: %v", err)
 	}
 
-	p, err := initProducer(cfg.Producer)
+	// setup producer
+	p, err := initProducer(cfg.Producer, logger)
 	if err != nil {
 		log.Fatalf("error starting producer: %v", err)
 	}
 
 	relay := relay{
-		consumer: c,
-		producer: p,
-		topics:   cfg.Topics,
-		metrics:  metrics.NewSet(),
-		logger:   slog.New(slog.NewJSONHandler(os.Stdout, nil)),
+		consumerMgr: m,
+		producer:    p,
+		topics:      cfg.Topics,
+		metrics:     metrics.NewSet(),
+		logger:      logger,
+
+		maxRetries:     cfg.App.MaxFailovers,
+		retryBackoffFn: retryBackoff(),
 	}
 
 	// Start metrics handler
@@ -100,7 +114,7 @@ func main() {
 	})
 
 	srv := http.Server{
-		Addr:         ":7081",
+		Addr:         cfg.App.MetricsServerAddr,
 		Handler:      mux,
 		ReadTimeout:  10 * time.Second,
 		WriteTimeout: 10 * time.Second,
@@ -115,13 +129,15 @@ func main() {
 
 	// Start forwarder daemon
 	if err := relay.Start(ctx); err != nil {
-		relay.logger.Error("error starting relay", err)
+		relay.logger.Error("error starting relay", "err", err)
 	}
 
 	// shutdown server
 	srv.Shutdown(ctx)
 
 	// cleanup
-	c.client.Close()
+	for _, cl := range m.c.clients {
+		cl.Close()
+	}
 	p.client.Close()
 }
