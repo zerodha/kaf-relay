@@ -27,6 +27,7 @@ type consumerManager struct {
 	c  *consumer
 
 	reconnectInProgress uint32
+	mode                string
 }
 
 // consumer is a structure that holds the state and configuration of a Kafka consumer group.
@@ -211,7 +212,7 @@ func (h *consumerHook) OnBrokerDisconnect(meta kgo.BrokerMetadata, conn net.Conn
 }
 
 // initConsumer initalizes the consumer when the programs boots up.
-func initConsumer(ctx context.Context, cfgs []ConsumerGroupCfg, l *slog.Logger) (*consumerManager, error) {
+func initConsumer(ctx context.Context, cfgs []ConsumerGroupCfg, mode string, l *slog.Logger) (*consumerManager, error) {
 	ctx, cancel := context.WithCancel(ctx)
 	c := consumer{
 		cfgs:      cfgs,
@@ -225,7 +226,7 @@ func initConsumer(ctx context.Context, cfgs []ConsumerGroupCfg, l *slog.Logger) 
 	c.ctx = append(c.ctx, ctx)
 	c.cancelFn = append(c.cancelFn, cancel)
 
-	m := consumerManager{c: &c}
+	m := consumerManager{c: &c, mode: mode}
 
 	// try connecting to the consumers one by one
 	// exit if none of the given nodes are available.
@@ -291,7 +292,7 @@ func (m *consumerManager) connect() error {
 		return fmt.Errorf("%w: %w", ErrBrokerUnavailable, err)
 	}
 
-	// create admin client
+	// create admin client for resetting offsets, fetching end offsets
 	admCl, err := getAdminClient(cfg)
 	if err != nil {
 		return err
@@ -333,10 +334,21 @@ func (m *consumerManager) connect() error {
 
 		// Reset consumer group offsets using the existing offsets
 		if m.c.offsets != nil {
+			// pause and close the group to mark the group as `Empty` (non-active) as resets are not allowed for `Stable` (active) consumer groups.
+			cl.PauseFetchTopics(cfg.Topics...)
+			cl.Close()
+
 			if err := resetOffsets(ctx, admCl, cfg, m.c.offsets, l); err != nil {
 				l.Error("error resetting offset", "err", err)
 				return err
 			}
+
+			cl, err = m.initKafkaConsumerGroup()
+			if err != nil {
+				return err
+			}
+
+			cl.ResumeFetchTopics(cfg.Topics...)
 		}
 	}
 
