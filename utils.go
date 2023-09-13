@@ -19,6 +19,8 @@ import (
 	"github.com/twmb/franz-go/pkg/sasl/scram"
 )
 
+const ModeFailover = "failover"
+
 func getCompressionCodec(codec string) kgo.CompressionCodec {
 	switch codec {
 	case "gzip":

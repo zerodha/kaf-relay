@@ -47,7 +47,11 @@ func (m *consumerManager) initKafkaConsumerGroup() (*kgo.Client, error) {
 				l.Error("error committing marked offsets", "err", err)
 			}
 		}),
-		kgo.WithHooks(hook),
+	}
+
+	// OnBrokerDisconnect hook will only be active in failover mode
+	if m.mode == ModeFailover {
+		opts = append(opts, kgo.WithHooks(hook))
 	}
 
 	if cfg.EnableLog {

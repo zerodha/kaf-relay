@@ -85,6 +85,8 @@ pollLoop:
 					continue pollLoop
 				}
 
+				r.retries++
+				waitTries(ctx, r.retryBackoffFn(r.retries))
 				r.logger.Error("error while consuming", "err", err.Err)
 			}
 

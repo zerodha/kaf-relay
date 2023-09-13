@@ -9,6 +9,7 @@ import (
 	"github.com/twmb/franz-go/pkg/kgo"
 )
 
+// getClient returns franz-go client with default config
 func getClient(cfg ConsumerGroupCfg) (*kgo.Client, error) {
 	opts := []kgo.Opt{
 		kgo.SeedBrokers(cfg.BootstrapBrokers...),
@@ -47,6 +48,7 @@ func getClient(cfg ConsumerGroupCfg) (*kgo.Client, error) {
 	return client, err
 }
 
+// getAdminClient create a *kgo.Client and wraps with kadm package
 func getAdminClient(cfg ConsumerGroupCfg) (*kadm.Client, error) {
 	client, err := getClient(cfg)
 	if err != nil {
@@ -56,6 +58,8 @@ func getAdminClient(cfg ConsumerGroupCfg) (*kadm.Client, error) {
 	return kadm.NewClient(client), nil
 }
 
+// resetOffsets resets the consumer group with the given offsets map.
+// Also waits for topics to catch up to the messages in case it is lagging behind.
 func resetOffsets(ctx context.Context, cl *kadm.Client, cfg ConsumerGroupCfg, offsets map[string]map[int32]kgo.EpochOffset, l *slog.Logger) error {
 	var (
 		backOff = retryBackoff()
@@ -90,7 +94,7 @@ waitForTopicLag:
 				if o.Offset > eO.Offset {
 					attempts++
 					b := backOff(attempts)
-					l.Debug("topic end offsets was lagging beging; waiting...", "backoff", b)
+					l.Debug("topic end offsets was lagging beging; waiting...", "backoff", b.Seconds())
 
 					waitTries(ctx, b)
 					continue waitForTopicLag

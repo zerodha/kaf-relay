@@ -31,8 +31,12 @@ func main() {
 		os.Exit(0)
 	}
 
-	var configPath string
+	var (
+		configPath string
+		mode       string
+	)
 	f.StringVar(&configPath, "config", "config.toml", "Path to the TOML configuration file")
+	f.StringVar(&mode, "mode", "single", "single/failover")
 	f.Bool("version", false, "Current version of the build")
 
 	if err := f.Parse(os.Args[1:]); err != nil {
@@ -80,7 +84,7 @@ func main() {
 	}))
 
 	// setup consumer
-	m, err := initConsumer(ctx, cfg.Consumers, logger)
+	m, err := initConsumer(ctx, cfg.Consumers, mode, logger)
 	if err != nil {
 		log.Fatalf("error starting consumer: %v", err)
 	}
@@ -137,6 +141,10 @@ func main() {
 
 	// cleanup
 	for _, cl := range m.c.clients {
+		if cl == nil {
+			continue
+		}
+
 		cl.Close()
 	}
 	p.client.Close()
