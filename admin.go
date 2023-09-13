@@ -47,15 +47,59 @@ func getClient(cfg ConsumerGroupCfg) (*kgo.Client, error) {
 	return client, err
 }
 
-func resetOffsets(ctx context.Context, cfg ConsumerGroupCfg, offsets map[string]map[int32]kgo.EpochOffset, l *slog.Logger) error {
+func getAdminClient(cfg ConsumerGroupCfg) (*kadm.Client, error) {
 	client, err := getClient(cfg)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
-	// setup admin client
-	adm := kadm.NewClient(client)
-	defer adm.Close()
+	return kadm.NewClient(client), nil
+}
+
+func resetOffsets(ctx context.Context, cl *kadm.Client, cfg ConsumerGroupCfg, offsets map[string]map[int32]kgo.EpochOffset, l *slog.Logger) error {
+	var (
+		backOff = retryBackoff()
+		//maxAttempts = 10
+		attempts = 0
+	)
+
+	// wait for topic lap to catch up
+waitForTopicLag:
+	for {
+		// if attempts >= maxAttempts {
+		// 	return fmt.Errorf("max attempts(%d) for fetching offsets", maxAttempts)
+		// }
+
+		l.Debug("fetching end offsets", "topics", cfg.Topics)
+
+		// Get end offsets of the topics
+		topicOffsets, err := cl.ListEndOffsets(ctx, cfg.Topics...)
+		if err != nil {
+			l.Error("error fetching offsets", "err", err)
+			return err
+		}
+
+		for t, po := range offsets {
+			for p, o := range po {
+				eO, ok := topicOffsets.Lookup(t, p)
+				// TODO:
+				if !ok {
+					continue
+				}
+
+				if o.Offset > eO.Offset {
+					attempts++
+					b := backOff(attempts)
+					l.Debug("topic end offsets was lagging beging; waiting...", "backoff", b)
+
+					waitTries(ctx, b)
+					continue waitForTopicLag
+				}
+			}
+		}
+
+		break waitForTopicLag
+	}
 
 	of := make(kadm.Offsets)
 	for t, po := range offsets {
@@ -66,16 +110,20 @@ func resetOffsets(ctx context.Context, cfg ConsumerGroupCfg, offsets map[string]
 
 	l.Debug("resetting offsets for consumer group",
 		"broker", cfg.BootstrapBrokers, "group", cfg.GroupID, "offsets", of)
-	resp, err := adm.CommitOffsets(ctx, cfg.GroupID, of)
+	resp, err := cl.CommitOffsets(ctx, cfg.GroupID, of)
 	if err != nil {
 		l.Error("error resetting group offset", "err", err)
 	}
 
-	resp.EachError(func(o kadm.OffsetResponse) {
-		if o.Err != nil {
-			l.Error("error resetting group offset", "err", o.Err)
+	// check for errors in offset responses
+	for _, or := range resp {
+		for _, r := range or {
+			if r.Err != nil {
+				l.Error("error resetting group offset", "err", r.Err)
+				return err
+			}
 		}
-	})
+	}
 
 	return nil
 }

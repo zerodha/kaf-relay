@@ -234,6 +234,7 @@ func initConsumer(ctx context.Context, cfgs []ConsumerGroupCfg, l *slog.Logger) 
 		defaultIdx = -1
 	)
 	for i := 0; i < len(cfgs); i++ {
+		l.Info("creating consumer group", "broker", cfgs[i].BootstrapBrokers, "group_id", cfgs[i].GroupID)
 		if err = m.connect(); err != nil {
 			l.Error("error creating consumer", "err", err)
 			continue
@@ -290,6 +291,13 @@ func (m *consumerManager) connect() error {
 		return fmt.Errorf("%w: %w", ErrBrokerUnavailable, err)
 	}
 
+	// create admin client
+	admCl, err := getAdminClient(cfg)
+	if err != nil {
+		return err
+	}
+	defer admCl.Close()
+
 	// Create a new context for this consumer group poll fetch loop
 	ctx, cancel := context.WithCancel(m.c.parentCtx)
 	m.setCurrentContext(ctx, cancel)
@@ -302,7 +310,7 @@ func (m *consumerManager) connect() error {
 
 		// Reset consumer group offsets using the existing offsets
 		if m.c.offsets != nil {
-			if err := resetOffsets(ctx, cfg, m.c.offsets, l); err != nil {
+			if err := resetOffsets(ctx, admCl, cfg, m.c.offsets, l); err != nil {
 				l.Error("error resetting offset", "err", err)
 				return err
 			}
@@ -325,7 +333,7 @@ func (m *consumerManager) connect() error {
 
 		// Reset consumer group offsets using the existing offsets
 		if m.c.offsets != nil {
-			if err := resetOffsets(ctx, cfg, m.c.offsets, l); err != nil {
+			if err := resetOffsets(ctx, admCl, cfg, m.c.offsets, l); err != nil {
 				l.Error("error resetting offset", "err", err)
 				return err
 			}

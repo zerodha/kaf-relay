@@ -1,4 +1,6 @@
 [app]
+max_failovers = 3
+
 log_level = "debug"
 metrics_server_addr = ":7081"
 
@@ -16,10 +18,14 @@ offset_commit_interval = "100ms"
 initial_offset = "start"
 group_id = "relay_group1"
 
+max_failovers = 3
+
 enable_tls = false
 client_key_path = ""
 client_cert_path = ""
 ca_cert_path = ""
+
+enable_log = false
 
 [[consumers]]
 name = "node2"
@@ -35,10 +41,14 @@ offset_commit_interval = "100ms"
 initial_offset = "start"
 group_id = "relay_group2"
 
+max_failovers = 3
+
 enable_tls = false
 client_key_path = ""
 client_cert_path = ""
 ca_cert_path = ""
+
+enable_log = false
 
 [topics]
 topicA = "machineX_topicA"
@@ -60,3 +70,5 @@ enable_tls = false
 client_key_path = ""
 client_cert_path = ""
 ca_cert_path = ""
+
+enable_log = false
