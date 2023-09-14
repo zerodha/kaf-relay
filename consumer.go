@@ -146,14 +146,14 @@ type consumerHook struct {
 // OnBrokerDisconnect is a callback function that handles broker disconnection events in a Kafka consumer group.
 // It checks the disconnection status, verifies the broker's state, and initiates reconnection if necessary.
 func (h *consumerHook) OnBrokerDisconnect(meta kgo.BrokerMetadata, conn net.Conn) {
-	if !atomic.CompareAndSwapUint32(&h.m.reconnectInProgress, 0, 1) {
+	// Prevent concurrent access of consumer manager when a reconnect is in progress
+	if !atomic.CompareAndSwapUint32(&h.m.reconnectInProgress, StateConnected, StateConnecting) {
 		h.m.c.logger.Debug("reconnect in progress; ignore OnBrokerDisconnect callback")
 		return
 	}
 
-	defer func() {
-		atomic.CompareAndSwapUint32(&h.m.reconnectInProgress, 1, 0)
-	}()
+	// flip the bit back to initial state
+	defer atomic.CompareAndSwapUint32(&h.m.reconnectInProgress, StateConnecting, StateConnected)
 
 	// lock before we attempting to replace the underlying client
 	h.m.Lock()
@@ -208,6 +208,10 @@ func (h *consumerHook) OnBrokerDisconnect(meta kgo.BrokerMetadata, conn net.Conn
 		// Add a retry backoff and loop through next nodes and break after few attempts
 	Loop:
 		for h.retries <= h.maxRetries {
+			if h.retries > 0 {
+				l.Debug("retrying...", "count", h.retries, "max_retries", h.maxRetries)
+			}
+
 			err := h.m.connect()
 			if err != nil {
 				l.Error("error creating consumer group", "brokers", cfg.BootstrapBrokers, "err", err)
@@ -249,11 +253,18 @@ func initConsumer(ctx context.Context, m *consumerManager, cfgs []ConsumerGroupC
 		err        error
 		defaultIdx = -1
 		brokersUp  = make(map[string]struct{})
+		retries    = 0
+		backoff    = retryBackoff()
 	)
 	for i := 0; i < len(cfgs); i++ {
 		l.Info("creating consumer group", "broker", cfgs[i].BootstrapBrokers, "group_id", cfgs[i].GroupID)
 		if err = m.connect(); err != nil {
 			l.Error("error creating consumer", "err", err)
+			if errors.Is(err, ErrBrokerUnavailable) {
+				retries++
+				waitTries(ctx, backoff(retries))
+			}
+
 			continue
 		}
 
@@ -282,6 +293,7 @@ func initConsumer(ctx context.Context, m *consumerManager, cfgs []ConsumerGroupC
 	return m, nil
 }
 
+// setActive assigns current active index inside consumer manager
 func (m *consumerManager) setActive(idx int) {
 	m.c.idx = idx
 	m.c.nextIndex = idx + 1
