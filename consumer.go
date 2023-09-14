@@ -27,7 +27,11 @@ type consumerManager struct {
 	c  *consumer
 
 	reconnectInProgress uint32
-	mode                string
+	currentGroupID      string
+
+	// single/failover
+	mode      string
+	brokersUp map[string]struct{}
 }
 
 // consumer is a structure that holds the state and configuration of a Kafka consumer group.
@@ -54,6 +58,16 @@ func (m *consumerManager) Lock() {
 
 func (m *consumerManager) Unlock() {
 	m.mu.Unlock()
+}
+
+// getOffsets returns the current offsets
+func (m *consumerManager) getOffsets() map[string]map[int32]kgo.EpochOffset {
+	return m.c.offsets
+}
+
+// setOffsets set the current offsets into relay struct
+func (m *consumerManager) setOffsets(o map[string]map[int32]kgo.EpochOffset) {
+	m.c.offsets = o
 }
 
 // getCurrentConfig returns the current consumer group config.
@@ -212,7 +226,7 @@ func (h *consumerHook) OnBrokerDisconnect(meta kgo.BrokerMetadata, conn net.Conn
 }
 
 // initConsumer initalizes the consumer when the programs boots up.
-func initConsumer(ctx context.Context, cfgs []ConsumerGroupCfg, mode string, l *slog.Logger) (*consumerManager, error) {
+func initConsumer(ctx context.Context, m *consumerManager, cfgs []ConsumerGroupCfg, l *slog.Logger) (*consumerManager, error) {
 	ctx, cancel := context.WithCancel(ctx)
 	c := consumer{
 		cfgs:      cfgs,
@@ -226,13 +240,15 @@ func initConsumer(ctx context.Context, cfgs []ConsumerGroupCfg, mode string, l *
 	c.ctx = append(c.ctx, ctx)
 	c.cancelFn = append(c.cancelFn, cancel)
 
-	m := consumerManager{c: &c, mode: mode}
+	// set consumer under manager
+	m.c = &c
 
 	// try connecting to the consumers one by one
 	// exit if none of the given nodes are available.
 	var (
 		err        error
 		defaultIdx = -1
+		brokersUp  = make(map[string]struct{})
 	)
 	for i := 0; i < len(cfgs); i++ {
 		l.Info("creating consumer group", "broker", cfgs[i].BootstrapBrokers, "group_id", cfgs[i].GroupID)
@@ -240,6 +256,10 @@ func initConsumer(ctx context.Context, cfgs []ConsumerGroupCfg, mode string, l *
 			l.Error("error creating consumer", "err", err)
 			continue
 		}
+
+		// mark the consumer group that is up
+		brokersUp[cfgs[i].GroupID] = struct{}{}
+
 		// Note down the consumer group index to make it default
 		if defaultIdx == -1 {
 			defaultIdx = i
@@ -257,7 +277,9 @@ func initConsumer(ctx context.Context, cfgs []ConsumerGroupCfg, mode string, l *
 	// TODO: Close other consumer groups?
 	m.setActive(defaultIdx)
 
-	return &m, nil
+	m.brokersUp = brokersUp
+
+	return m, nil
 }
 
 func (m *consumerManager) setActive(idx int) {

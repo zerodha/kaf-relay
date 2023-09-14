@@ -1,5 +1,6 @@
 [app]
 max_failovers = 3
+checkpoint = "./relay.checkpoint"
 
 log_level = "debug"
 metrics_server_addr = ":7081"
