@@ -24,6 +24,8 @@ type Config struct {
 type AppCfg struct {
 	MaxFailovers int `koanf:"max_failovers"`
 
+	Checkpoint string `koanf:"checkpoint"`
+
 	LogLevel          slog.Level `koanf:"log_level"`
 	MetricsServerAddr string     `koanf:"metrics_server_addr"`
 }
