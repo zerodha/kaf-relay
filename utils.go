@@ -19,7 +19,12 @@ import (
 	"github.com/twmb/franz-go/pkg/sasl/scram"
 )
 
-const ModeFailover = "failover"
+const (
+	ModeFailover = "failover"
+
+	StateConnected = iota - 1
+	StateConnecting
+)
 
 func getCompressionCodec(codec string) kgo.CompressionCodec {
 	switch codec {
@@ -55,6 +60,7 @@ func getAckPolicy(ack string) kgo.Acks {
 	}
 }
 
+// testConnection tests if the connection is active or not; Also confirms the existence of topics
 func testConnection(client *kgo.Client, timeout time.Duration, topics []string) error {
 	if timeout == 0 {
 		timeout = 15 * time.Second
@@ -181,8 +187,8 @@ func retryBackoff() func(int) time.Duration {
 	rng := rand.New(rand.NewSource(time.Now().UnixNano()))
 	return func(fails int) time.Duration {
 		const (
-			min = 250 * time.Millisecond
-			max = 5 * time.Second / 2
+			min = 500 * time.Millisecond
+			max = 10 * time.Second / 2
 		)
 		if fails <= 0 {
 			return min
