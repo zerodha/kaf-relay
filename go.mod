@@ -2,8 +2,6 @@ module github.com/joeirimpan/kaf-relay
 
 go 1.21
 
-replace github.com/twmb/franz-go => ../franz-go
-
 require (
 	github.com/knadh/koanf/parsers/toml v0.1.0
 	github.com/knadh/koanf/providers/file v0.1.0
