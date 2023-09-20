@@ -8,7 +8,9 @@ Relay is a program designed to replicate messages on topics from one Kafka clust
 * Topic Forwarding: Relay consumes messages from topics in one Kafka cluster and forwards them to topics in another Kafka cluster.
 * Authentication: PLAIN, SCRAM-SHA-256, SCRAM-SHA-512
 * Topic Remapping: Relay allows you to specify topic remappings, enabling you to map a topic from the source cluster to a different topic in the destination cluster.
-* Consumer group failover: Assuming we have muliple identical kafkas (separate nodes) at the upstream side, this mode allows us to fallback to the nest kafka in a round-robin fashion if current broker goes down. This allows us to deduplicate messages downstream without using any external stores.
+* Consumer group failover: Assuming we have multiple identical kafkas (separate nodes 1...N) at the upstream side, this mode allows us to fallback to the next kafka in a round-robin fashion if current broker goes down. This allows us to deduplicate messages downstream without using any external stores.
+
+![image](./screenshots/relay.png)
 
 ## Prerequisites
 
