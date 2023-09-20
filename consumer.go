@@ -117,7 +117,12 @@ func (m *consumerManager) commit(r *kgo.Record) {
 		cl.CommitOffsetsSync(ctx, tOMap,
 			func(cl *kgo.Client, ocr1 *kmsg.OffsetCommitRequest, ocr2 *kmsg.OffsetCommitResponse, err error) {
 				// keep offsets in memory
-				m.c.offsets = tOMap
+				if m.c.offsets != nil {
+					m.c.offsets[r.Topic] = oMap
+				} else {
+					m.c.offsets = make(map[string]map[int32]kgo.EpochOffset)
+					m.c.offsets[r.Topic] = oMap
+				}
 			},
 		)
 		return
