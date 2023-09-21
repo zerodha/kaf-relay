@@ -48,24 +48,37 @@ func getClient(cfg ConsumerGroupCfg) (*kgo.Client, error) {
 	return client, err
 }
 
-// getAdminClient create a *kgo.Client and wraps with kadm package
-func getAdminClient(cfg ConsumerGroupCfg) (*kadm.Client, error) {
-	client, err := getClient(cfg)
-	if err != nil {
-		return nil, err
+// leaveAndResetOffsets leaves the current consumer group and resets its offset if given.
+func leaveAndResetOffsets(ctx context.Context, cl *kgo.Client, cfg ConsumerGroupCfg, offsets map[string]map[int32]kgo.EpochOffset, l *slog.Logger) error {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	// leave group; mark the group as `Empty` before attempting to reset offsets.
+	l.Debug("leaving group", "group_id", cfg.GroupID)
+	if err := cl.LeaveGroupContext(ctx); err != nil {
+		return err
 	}
 
-	return kadm.NewClient(client), nil
+	// Reset consumer group offsets using the existing offsets
+	if offsets != nil {
+		if err := resetOffsets(ctx, cl, cfg, offsets, l); err != nil {
+			return err
+		}
+	}
+
+	return nil
 }
 
 // resetOffsets resets the consumer group with the given offsets map.
 // Also waits for topics to catch up to the messages in case it is lagging behind.
-func resetOffsets(ctx context.Context, cl *kadm.Client, cfg ConsumerGroupCfg, offsets map[string]map[int32]kgo.EpochOffset, l *slog.Logger) error {
+func resetOffsets(ctx context.Context, cl *kgo.Client, cfg ConsumerGroupCfg, offsets map[string]map[int32]kgo.EpochOffset, l *slog.Logger) error {
 	var (
 		backOff = retryBackoff()
 		//maxAttempts = 10
 		attempts = 0
+		admCl    = kadm.NewClient(cl)
 	)
+	defer admCl.Close()
 
 	// wait for topic lap to catch up
 waitForTopicLag:
@@ -77,7 +90,7 @@ waitForTopicLag:
 		l.Debug("fetching end offsets", "topics", cfg.Topics)
 
 		// Get end offsets of the topics
-		topicOffsets, err := cl.ListEndOffsets(ctx, cfg.Topics...)
+		topicOffsets, err := admCl.ListEndOffsets(ctx, cfg.Topics...)
 		if err != nil {
 			l.Error("error fetching offsets", "err", err)
 			return err
@@ -114,7 +127,7 @@ waitForTopicLag:
 
 	l.Debug("resetting offsets for consumer group",
 		"broker", cfg.BootstrapBrokers, "group", cfg.GroupID, "offsets", of)
-	resp, err := cl.CommitOffsets(ctx, cfg.GroupID, of)
+	resp, err := admCl.CommitOffsets(ctx, cfg.GroupID, of)
 	if err != nil {
 		l.Error("error resetting group offset", "err", err)
 	}

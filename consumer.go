@@ -331,39 +331,19 @@ func (m *consumerManager) connect() error {
 		return fmt.Errorf("%w: %w", ErrBrokerUnavailable, err)
 	}
 
-	// create admin client for resetting offsets, fetching end offsets
-	admCl, err := getAdminClient(cfg)
-	if err != nil {
-		return err
-	}
-	defer admCl.Close()
-
 	// Create a new context for this consumer group poll fetch loop
 	ctx, cancel := context.WithCancel(m.c.parentCtx)
 	m.setCurrentContext(ctx, cancel)
 
+	var reinit bool
 	if cl != nil {
+		reinit = true
 		l.Debug("reusing consumer", "broker", cfg.BootstrapBrokers, "group_id", cfg.GroupID)
-		// Offset reset can only be done for `Empty` state consumer groups.
-		// Close marks it as `Empty` eventually -> reset offset -> re-init consumer group -> voila!
-		cl.Close()
 
-		// Reset consumer group offsets using the existing offsets
-		if m.c.offsets != nil {
-			if err := resetOffsets(ctx, admCl, cfg, m.c.offsets, l); err != nil {
-				l.Error("error resetting offset", "err", err)
-				return err
-			}
-		}
-
-		l.Debug("reinitializing consumer group", "broker", cfg.BootstrapBrokers, "group_id", cfg.GroupID)
-		cl, err = m.initKafkaConsumerGroup()
-		if err != nil {
+		if err := leaveAndResetOffsets(ctx, cl, cfg, m.c.offsets, l); err != nil {
+			l.Error("error leave and reset offsets", "err", err)
 			return err
 		}
-
-		l.Debug("resuming consumer fetch topics", "broker", cfg.BootstrapBrokers, "group_id", cfg.GroupID, "topics", cfg.Topics)
-		cl.ResumeFetchTopics(cfg.Topics...)
 	} else {
 		l.Debug("creating consumer", "broker", cfg.BootstrapBrokers, "group_id", cfg.GroupID)
 		cl, err = m.initKafkaConsumerGroup()
@@ -373,22 +353,27 @@ func (m *consumerManager) connect() error {
 
 		// Reset consumer group offsets using the existing offsets
 		if m.c.offsets != nil {
+			reinit = true
 			// pause and close the group to mark the group as `Empty` (non-active) as resets are not allowed for `Stable` (active) consumer groups.
 			cl.PauseFetchTopics(cfg.Topics...)
-			cl.Close()
 
-			if err := resetOffsets(ctx, admCl, cfg, m.c.offsets, l); err != nil {
-				l.Error("error resetting offset", "err", err)
+			if err := leaveAndResetOffsets(ctx, cl, cfg, m.c.offsets, l); err != nil {
+				l.Error("error leave and reset offsets", "err", err)
 				return err
 			}
-
-			cl, err = m.initKafkaConsumerGroup()
-			if err != nil {
-				return err
-			}
-
-			cl.ResumeFetchTopics(cfg.Topics...)
 		}
+	}
+
+	// No offsets in memory; we aren't required to reinit as a clean client is already there.
+	if reinit {
+		l.Debug("reinitializing consumer group", "broker", cfg.BootstrapBrokers, "group_id", cfg.GroupID)
+		cl, err = m.initKafkaConsumerGroup()
+		if err != nil {
+			return err
+		}
+
+		l.Debug("resuming consumer fetch topics", "broker", cfg.BootstrapBrokers, "group_id", cfg.GroupID, "topics", cfg.Topics)
+		cl.ResumeFetchTopics(cfg.Topics...)
 	}
 
 	// Replace the current client index with new client
