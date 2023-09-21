@@ -2,9 +2,11 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
+	"time"
 
 	"github.com/VictoriaMetrics/metrics"
 	"github.com/twmb/franz-go/pkg/kadm"
@@ -17,30 +19,79 @@ var (
 
 // relay represents the input, output kafka and the remapping necessary to forward messages from one topic to another.
 type relay struct {
-	consumer consumer
-	producer producer
+	consumerMgr *consumerManager
+	producer    *producer
 
 	topics  map[string]string
 	metrics *metrics.Set
+	logger  *slog.Logger
+
+	// retry
+	retryBackoffFn func(int) time.Duration
+	maxRetries     int
+	retries        int
 }
 
 // Start starts the consumer loop on kafka (A), fetch messages and relays over to kafka (B) using an async producer.
-func (r *relay) Start(ctx context.Context) {
-	r.validateOffsets(ctx)
+func (r *relay) Start(ctx context.Context) error {
+	if err := r.validateOffsets(ctx); err != nil {
+		return err
+	}
 
-Loop:
+pollLoop:
 	for {
+		// exit if max retries is exhausted
+		if r.retries >= r.maxRetries {
+			return fmt.Errorf("`max_retries`(%d) exhausted; exiting relay", r.maxRetries)
+		}
+
 		select {
 		case <-ctx.Done():
-			break Loop
+			break pollLoop
 		default:
-			fetches := r.consumer.client.PollFetches(ctx)
+			// get consumer specific context, client
+			r.consumerMgr.Lock()
+			childCtx, _ := r.consumerMgr.getCurrentContext()
+			cl := r.consumerMgr.getCurrentClient()
+			r.consumerMgr.Unlock()
+
+			r.logger.Debug("polling active consumer", "broker", cl.OptValue(kgo.SeedBrokers))
+			fetches := cl.PollFetches(childCtx)
+
+			if fetches.IsClientClosed() {
+				r.retries++
+				waitTries(ctx, r.retryBackoffFn(r.retries))
+
+				r.logger.Debug("consumer group fetch client closed")
+				continue pollLoop
+			}
 
 			// Proxy fetch errors into error callback function
-			errors := fetches.Errors()
-			for _, err := range errors {
-				log.Printf("error consuming: %v", err.Err)
+			errs := fetches.Errors()
+			for _, err := range errs {
+				if errors.Is(err.Err, kgo.ErrClientClosed) {
+					r.retries++
+					waitTries(ctx, r.retryBackoffFn(r.retries))
+
+					r.logger.Debug("consumer group fetch error client closed", "broker", cl.OptValue(kgo.SeedBrokers))
+					continue pollLoop
+				}
+
+				if errors.Is(err.Err, context.Canceled) {
+					r.retries++
+					waitTries(ctx, r.retryBackoffFn(r.retries))
+
+					r.logger.Debug("consumer group fetch error client context cancelled", "broker", cl.OptValue(kgo.SeedBrokers))
+					continue pollLoop
+				}
+
+				r.retries++
+				waitTries(ctx, r.retryBackoffFn(r.retries))
+				r.logger.Error("error while consuming", "err", err.Err)
 			}
+
+			// reset max retries if successfull
+			r.retries = 0
 
 			iter := fetches.RecordIter()
 			for !iter.Done() {
@@ -52,7 +103,7 @@ Loop:
 					continue
 				}
 
-				forward := &kgo.Record{
+				msg := &kgo.Record{
 					Key:       rec.Key,
 					Value:     rec.Value,
 					Topic:     t, // remap destination topic
@@ -61,26 +112,32 @@ Loop:
 
 				r.metrics.GetOrCreateCounter(fmt.Sprintf(RelayMetric, rec.Topic, t, rec.Partition)).Inc()
 
-				// Async producer which internally batches the messages as per producer `batch_size`
-				r.producer.client.Produce(ctx, forward, func(r *kgo.Record, err error) {
-					if err != nil {
-						log.Printf("error producing message: %v", err)
-					}
-				})
+				r.logger.Debug("producing message", "broker", r.producer.client.OptValue(kgo.SeedBrokers), "msg", msg)
 
-				// Mark / commit offsets
-				r.consumer.commit(ctx, rec)
+				// Async producer which internally batches the messages as per producer `batch_size`
+				r.producer.client.Produce(ctx, msg, func(rec *kgo.Record, err error) {
+					if err != nil {
+						r.logger.Error("error producing message", "err", err)
+						return
+					}
+
+					// Mark / commit offsets
+					r.consumerMgr.commit(rec)
+				})
 			}
 		}
 	}
+
+	return nil
 }
 
+// getMetrics writes the internal prom metrics to the given io.Writer
 func (r *relay) getMetrics(buf io.Writer) {
 	r.metrics.WritePrometheus(buf)
 }
 
 // validateOffsets makes sure that source, destination has same topic, partitions.
-func (r *relay) validateOffsets(ctx context.Context) {
+func (r *relay) validateOffsets(ctx context.Context) error {
 	var (
 		consTopics []string
 		prodTopics []string
@@ -90,55 +147,72 @@ func (r *relay) validateOffsets(ctx context.Context) {
 		prodTopics = append(prodTopics, p)
 	}
 
-	consOffsets := getEndOffsets(ctx, r.consumer.client, consTopics)
-	prodOffsets := getEndOffsets(ctx, r.producer.client, prodTopics)
+	r.consumerMgr.Lock()
+	c := r.consumerMgr.getCurrentClient()
+	r.consumerMgr.Unlock()
 
-	commitOffsets := getCommittedOffsets(ctx, r.consumer.client, consTopics)
+	consOffsets, err := getEndOffsets(ctx, c, consTopics)
+	if err != nil {
+		return err
+	}
+	prodOffsets, err := getEndOffsets(ctx, r.producer.client, prodTopics)
+	if err != nil {
+		return err
+	}
 
-	consOffsets.Each(func(lo kadm.ListedOffset) {
-		// Check if mapping exists
-		t, ok := r.topics[lo.Topic]
-		if !ok {
-			log.Fatalf("error finding destination topic for %v in given mapping", lo.Topic)
-		}
+	commitOffsets, err := getCommittedOffsets(ctx, c, consTopics)
+	if err != nil {
+		return err
+	}
 
-		// Check if topic, partition exists in destination
-		destOffset, ok := prodOffsets.Lookup(t, lo.Partition)
-		if !ok {
-			log.Fatalf("error finding destination topic, partition for %v in destination kafka", lo.Topic)
-		}
-
-		// Confirm that committed offsets of consumer group matches the offsets of destination kafka topic partition
-		if destOffset.Offset > 0 {
-			o, ok := commitOffsets.Lookup(lo.Topic, destOffset.Partition)
+	for _, ps := range consOffsets {
+		for _, o := range ps {
+			// Check if mapping exists
+			t, ok := r.topics[o.Topic]
 			if !ok {
-				log.Fatalf("error finding topic, partition for %v in source kafka", lo.Topic)
+				return fmt.Errorf("error finding destination topic for %v in given mapping", o.Topic)
 			}
 
-			if destOffset.Offset > o.Offset {
-				log.Fatalf("destination topic(%v), partition(%v) offsets(%v) is higher than consumer group committed offsets(%v).",
-					destOffset.Topic, destOffset.Partition, destOffset.Offset, o.Offset)
+			// Check if topic, partition exists in destination
+			destOffset, ok := prodOffsets.Lookup(t, o.Partition)
+			if !ok {
+				return fmt.Errorf("error finding destination topic, partition for %v in destination kafka", o.Topic)
+			}
+
+			// Confirm that committed offsets of consumer group matches the offsets of destination kafka topic partition
+			if destOffset.Offset > 0 {
+				o, ok := commitOffsets.Lookup(o.Topic, destOffset.Partition)
+				if !ok {
+					return fmt.Errorf("error finding topic, partition for %v in source kafka", o.Topic)
+				}
+
+				if destOffset.Offset > o.Offset {
+					return fmt.Errorf("destination topic(%v), partition(%v) offsets(%v) is higher than consumer group committed offsets(%v)",
+						destOffset.Topic, destOffset.Partition, destOffset.Offset, o.Offset)
+				}
 			}
 		}
-	})
+	}
+
+	return nil
 }
 
-func getCommittedOffsets(ctx context.Context, client *kgo.Client, topics []string) kadm.ListedOffsets {
+func getCommittedOffsets(ctx context.Context, client *kgo.Client, topics []string) (kadm.ListedOffsets, error) {
 	adm := kadm.NewClient(client)
 	offsets, err := adm.ListCommittedOffsets(ctx, topics...)
 	if err != nil {
-		log.Fatalf("error listing committed offsets of topics(%v): %v", topics, err)
+		return nil, fmt.Errorf("error listing committed offsets of topics(%v): %v", topics, err)
 	}
 
-	return offsets
+	return offsets, nil
 }
 
-func getEndOffsets(ctx context.Context, client *kgo.Client, topics []string) kadm.ListedOffsets {
+func getEndOffsets(ctx context.Context, client *kgo.Client, topics []string) (kadm.ListedOffsets, error) {
 	adm := kadm.NewClient(client)
 	offsets, err := adm.ListEndOffsets(ctx, topics...)
 	if err != nil {
-		log.Fatalf("error listing end offsets of topics(%v): %v", topics, err)
+		return nil, fmt.Errorf("error listing end offsets of topics(%v): %v", topics, err)
 	}
 
-	return offsets
+	return offsets, nil
 }

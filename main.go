@@ -3,8 +3,10 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/gob"
 	"fmt"
 	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
@@ -22,6 +24,10 @@ var (
 	buildString = "unknown"
 )
 
+func init() {
+	gob.Register(checkPoint{})
+}
+
 func main() {
 	// Initialize config
 	f := flag.NewFlagSet("config", flag.ContinueOnError)
@@ -30,8 +36,12 @@ func main() {
 		os.Exit(0)
 	}
 
-	var configPath string
+	var (
+		configPath string
+		mode       string
+	)
 	f.StringVar(&configPath, "config", "config.toml", "Path to the TOML configuration file")
+	f.StringVar(&mode, "mode", "single", "single/failover")
 	f.Bool("version", false, "Current version of the build")
 
 	if err := f.Parse(os.Args[1:]); err != nil {
@@ -62,28 +72,51 @@ func main() {
 		topics = append(topics, t)
 	}
 
-	cfg.Consumer.Topics = topics
+	// Set consumer topics
+	for i := 0; i < len(cfg.Consumers); i++ {
+		cfg.Consumers[i].Topics = topics
+	}
 	cfg.Producer.Topics = cfg.Topics
 
 	// Create context with interrupts signals
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
-	c, err := initConsumer(ctx, cfg.Consumer)
+	// setup logger
+	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
+		AddSource: false,
+		Level:     cfg.App.LogLevel,
+	}))
+
+	// create consumer manager
+	m := &consumerManager{mode: mode}
+
+	// setup consumer
+	m, err := initConsumer(ctx, m, cfg.Consumers, logger)
 	if err != nil {
 		log.Fatalf("error starting consumer: %v", err)
 	}
 
-	p, err := initProducer(cfg.Producer)
+	// load checkpoint
+	if err := loadCheckpoint(cfg.App.Checkpoint, m, logger); err != nil {
+		log.Fatalf("error loading checkpoint: %v", err)
+	}
+
+	// setup producer
+	p, err := initProducer(cfg.Producer, logger)
 	if err != nil {
 		log.Fatalf("error starting producer: %v", err)
 	}
 
 	relay := relay{
-		consumer: c,
-		producer: p,
-		topics:   cfg.Topics,
-		metrics:  metrics.NewSet(),
+		consumerMgr: m,
+		producer:    p,
+		topics:      cfg.Topics,
+		metrics:     metrics.NewSet(),
+		logger:      logger,
+
+		maxRetries:     cfg.App.MaxFailovers,
+		retryBackoffFn: retryBackoff(),
 	}
 
 	// Start metrics handler
@@ -98,7 +131,7 @@ func main() {
 	})
 
 	srv := http.Server{
-		Addr:         ":7081",
+		Addr:         cfg.App.MetricsServerAddr,
 		Handler:      mux,
 		ReadTimeout:  10 * time.Second,
 		WriteTimeout: 10 * time.Second,
@@ -112,12 +145,25 @@ func main() {
 	}()
 
 	// Start forwarder daemon
-	relay.Start(ctx)
+	if err := relay.Start(ctx); err != nil {
+		relay.logger.Error("error starting relay", "err", err)
+	}
 
 	// shutdown server
 	srv.Shutdown(ctx)
 
 	// cleanup
-	c.client.Close()
+	for _, cl := range m.c.clients {
+		if cl == nil {
+			continue
+		}
+
+		cl.Close()
+	}
 	p.client.Close()
+
+	// save the offsets to file
+	if err := saveCheckpoint(cfg.App.Checkpoint, m, logger); err != nil {
+		log.Fatalf("error saving checkpoint: %v", err)
+	}
 }
