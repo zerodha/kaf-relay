@@ -2,56 +2,62 @@ package main
 
 import (
 	"context"
-	"log"
+	"os"
 
 	"github.com/twmb/franz-go/pkg/kgo"
-	"github.com/twmb/franz-go/pkg/sasl/plain"
-	"github.com/twmb/franz-go/pkg/sasl/scram"
 )
 
-type consumer struct {
-	client *kgo.Client
+func (m *consumerManager) initKafkaConsumerGroup() (*kgo.Client, error) {
+	var (
+		cfg      = m.getCurrentConfig()
+		clCtx, _ = m.getCurrentContext()
+		hook     = &consumerHook{
+			m: m,
 
-	cfg ConsumerGroupConfig
-}
-
-func (c *consumer) commit(ctx context.Context, r *kgo.Record) {
-	// If autocommit is disabled allow committing directly,
-	// or else just mark the message to commit.
-	if c.cfg.OffsetCommitInterval == 0 {
-		oMap := make(map[int32]kgo.EpochOffset)
-		oMap[r.Partition] = kgo.EpochOffset{
-			Epoch:  r.LeaderEpoch,
-			Offset: r.Offset + 1,
+			retryBackoffFn: retryBackoff(),
+			maxRetries:     cfg.MaxFailovers,
 		}
-		tOMap := make(map[string]map[int32]kgo.EpochOffset)
-		tOMap[r.Topic] = oMap
-		c.client.CommitOffsetsSync(ctx, tOMap, nil)
-		return
-	}
+		l = m.c.logger
+	)
 
-	c.client.MarkCommitRecords(r)
-}
-
-func initConsumer(ctx context.Context, cfg ConsumerGroupConfig) (consumer, error) {
 	opts := []kgo.Opt{
 		kgo.SeedBrokers(cfg.BootstrapBrokers...),
 		kgo.FetchMaxWait(cfg.MaxWaitTime),
 		kgo.ConsumeTopics(cfg.Topics...),
 		kgo.ConsumerGroup(cfg.GroupID),
 		kgo.SessionTimeout(cfg.SessionTimeout),
-		kgo.OnPartitionsRevoked(func(ctx context.Context, c *kgo.Client, m map[string][]int32) {
+		kgo.OnPartitionsAssigned(func(ctx context.Context, cl *kgo.Client, claims map[string][]int32) {
+			select {
+			case <-clCtx.Done():
+				return
+			case <-m.c.parentCtx.Done():
+				return
+			case <-ctx.Done():
+				return
+			default:
+				l.Debug("partitioned assigned", "broker", cl.OptValue(kgo.SeedBrokers), "claims", claims)
+			}
+		}),
+		kgo.OnPartitionsRevoked(func(ctx context.Context, cl *kgo.Client, m map[string][]int32) {
 			// on close triggers this callback, use this to commit the marked offsets before exiting.
 			nCtx, cancel := context.WithTimeout(ctx, cfg.SessionTimeout)
 			defer cancel()
 
-			if err := c.CommitMarkedOffsets(nCtx); err != nil {
-				log.Printf("error committing marked offsets: %v", err)
+			if err := cl.CommitMarkedOffsets(nCtx); err != nil {
+				l.Error("error committing marked offsets", "err", err)
 			}
 		}),
 	}
 
-	// TODO: Add relative offsets
+	// OnBrokerDisconnect hook will only be active in failover mode
+	if m.mode == ModeFailover {
+		opts = append(opts, kgo.WithHooks(hook))
+	}
+
+	if cfg.EnableLog {
+		opts = append(opts, kgo.WithLogger(kgo.BasicLogger(os.Stdout, kgo.LogLevelDebug, nil)))
+	}
+
 	switch cfg.Offset {
 	case "start":
 		opts = append(opts, kgo.ConsumeResetOffset(kgo.NewOffset().AtStart()))
@@ -63,99 +69,39 @@ func initConsumer(ctx context.Context, cfg ConsumerGroupConfig) (consumer, error
 	case cfg.OffsetCommitInterval == 0:
 		opts = append(opts, kgo.DisableAutoCommit())
 	case cfg.OffsetCommitInterval > 0:
-		opts = append(opts, kgo.AutoCommitInterval(cfg.OffsetCommitInterval))
-		opts = append(opts, kgo.AutoCommitMarks())
+		// XXX Disable autocommit for failovers as we are not able exit autocommit goroutines safely.
+		if len(m.c.cfgs) > 1 {
+			l.Info("disabling autocommit for consumers failover mode")
+			opts = append(opts, kgo.DisableAutoCommit())
+		} else {
+			opts = append(opts, kgo.AutoCommitInterval(cfg.OffsetCommitInterval))
+			opts = append(opts, kgo.AutoCommitMarks())
+		}
 	}
 
 	// Add authentication
 	if cfg.EnableAuth {
-		opts = appendSASL(opts, cfg.ClientConfig)
+		opts = appendSASL(opts, cfg.ClientCfg)
 	}
 
-	client, err := kgo.NewClient(opts...)
+	if cfg.EnableTLS {
+		if cfg.CACertPath == "" && cfg.ClientCertPath == "" && cfg.ClientKeyPath == "" {
+			opts = append(opts, kgo.DialTLS())
+		} else {
+			tlsOpt, err := createTLSConfig(cfg.CACertPath, cfg.ClientCertPath, cfg.ClientKeyPath)
+			if err != nil {
+				return nil, err
+			}
+
+			// Set up TLS configuration
+			opts = append(opts, tlsOpt)
+		}
+	}
+
+	cl, err := kgo.NewClient(opts...)
 	if err != nil {
-		return consumer{}, err
+		return nil, err
 	}
 
-	// test connectivity and ensures the source topics exists
-	if err := testConnection(client, cfg.SessionTimeout, cfg.Topics); err != nil {
-		return consumer{}, err
-	}
-
-	return consumer{client: client, cfg: cfg}, nil
-}
-
-type producer struct {
-	client *kgo.Client
-}
-
-func initProducer(cfg ProducerConfig) (producer, error) {
-	prod := producer{}
-	opts := []kgo.Opt{
-		kgo.AllowAutoTopicCreation(),
-		kgo.RequestRetries(cfg.MaxRetries),
-		kgo.ProducerBatchMaxBytes(int32(cfg.MaxMessageBytes)),
-		kgo.MaxBufferedRecords(cfg.BatchSize),
-		kgo.ProducerLinger(cfg.FlushFrequency),
-		kgo.ProducerBatchCompression(getCompressionCodec(cfg.Compression)),
-		kgo.SeedBrokers(cfg.BootstrapBrokers...),
-		kgo.RequiredAcks(getAckPolicy(cfg.CommitAck)),
-	}
-
-	// TCPAck/LeaderAck requires kafka deduplication to be turned off
-	if !cfg.EnableIdempotency {
-		opts = append(opts, kgo.DisableIdempotentWrite())
-	}
-
-	opts = append(opts, kgo.RecordPartitioner(kgo.ManualPartitioner()))
-
-	// Add authentication
-	if cfg.EnableAuth {
-		opts = appendSASL(opts, cfg.ClientConfig)
-	}
-
-	client, err := kgo.NewClient(opts...)
-	if err != nil {
-		return producer{}, err
-	}
-
-	// Get the destination topics
-	var topics []string
-	for _, v := range cfg.Topics {
-		topics = append(topics, v)
-	}
-
-	// test connectivity and ensures destination topics exists.
-	if err := testConnection(client, cfg.SessionTimeout, topics); err != nil {
-		return producer{}, err
-	}
-
-	prod.client = client
-	return prod, nil
-}
-
-func appendSASL(opts []kgo.Opt, cfg ClientConfig) []kgo.Opt {
-	switch m := cfg.SASLMechanism; m {
-	case SASLMechanismPlain:
-		p := plain.Auth{
-			User: cfg.Username,
-			Pass: cfg.Password,
-		}
-		opts = append(opts, kgo.SASL(p.AsMechanism()))
-
-	case SASLMechanismScramSHA256, SASLMechanismScramSHA512:
-		p := scram.Auth{
-			User: cfg.Username,
-			Pass: cfg.Password,
-		}
-
-		mech := p.AsSha256Mechanism()
-		if m == SASLMechanismScramSHA512 {
-			mech = p.AsSha512Mechanism()
-		}
-
-		opts = append(opts, kgo.SASL(mech))
-	}
-
-	return opts
+	return cl, nil
 }
