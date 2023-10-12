@@ -2,10 +2,63 @@ package main
 
 import (
 	"context"
+	"fmt"
+	"log/slog"
 	"os"
+	"path/filepath"
+	"plugin"
+	"strings"
 
+	"github.com/joeirimpan/kaf-relay/filter"
+	"github.com/knadh/koanf/v2"
 	"github.com/twmb/franz-go/pkg/kgo"
 )
+
+// initFilterProviders loads the go plugin, initializes it and return a map of filter plugins.
+func initFilterProviders(names []string, ko *koanf.Koanf, log *slog.Logger) (map[string]filter.Provider, error) {
+	out := make(map[string]filter.Provider)
+	for _, fName := range names {
+		plg, err := plugin.Open(fName)
+		if err != nil {
+			return nil, fmt.Errorf("error loading provider plugin '%s': %v", fName, err)
+		}
+		id := strings.TrimSuffix(filepath.Base(fName), filepath.Ext(fName))
+
+		newFunc, err := plg.Lookup("New")
+		if err != nil {
+			return nil, fmt.Errorf("New() function not found in plugin '%s': %v", id, err)
+		}
+		f, ok := newFunc.(func([]byte) (interface{}, error))
+		if !ok {
+			return nil, fmt.Errorf("New() function is of invalid type (%T) in plugin '%s'", newFunc, id)
+		}
+
+		var cfg filter.Config
+		ko.Unmarshal("filter."+id, &cfg)
+		if cfg.Config == "" {
+			log.Info(fmt.Sprintf("WARNING: No config 'filter.%s' for '%s' in config", id, id))
+		}
+
+		// Initialize the plugin.
+		prov, err := f([]byte(cfg.Config))
+		if err != nil {
+			return nil, fmt.Errorf("error initializing filter provider plugin '%s': %v", id, err)
+		}
+		log.Info(fmt.Sprintf("loaded filter provider plugin '%s' from %s", id, fName))
+
+		p, ok := prov.(filter.Provider)
+		if !ok {
+			return nil, fmt.Errorf("New() function does not return a provider that satisfies filter.Provider (%T) in plugin '%s'", prov, id)
+		}
+
+		if p.ID() != id {
+			return nil, fmt.Errorf("filter provider plugin ID doesn't match '%s' != %s", id, p.ID())
+		}
+		out[p.ID()] = p
+	}
+
+	return out, nil
+}
 
 func (m *consumerManager) initKafkaConsumerGroup() (*kgo.Client, error) {
 	var (

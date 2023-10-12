@@ -40,11 +40,13 @@ func main() {
 		configPath            string
 		mode                  string
 		checkpoint, stopAtEnd bool
+		filterPaths           []string
 	)
 	f.StringVar(&configPath, "config", "config.toml", "Path to the TOML configuration file")
 	f.StringVar(&mode, "mode", "single", "single/failover")
 	f.BoolVar(&checkpoint, "checkpoint", false, "Use checkpoint file or not")
 	f.BoolVar(&stopAtEnd, "stop-at-end", false, "Stop relay at the end of offsets")
+	f.StringSliceVar(&filterPaths, "filter", []string{}, "Path to filter providers. Can specify multiple values.")
 	f.Bool("version", false, "Current version of the build")
 
 	if err := f.Parse(os.Args[1:]); err != nil {
@@ -69,6 +71,18 @@ func main() {
 		log.Fatalf("error marshalling application config: %v", err)
 	}
 
+	// setup logger
+	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
+		AddSource: false,
+		Level:     cfg.App.LogLevel,
+	}))
+
+	// setup filter providers
+	filters, err := initFilterProviders(filterPaths, ko, logger)
+	if err != nil {
+		log.Fatalf("error initializing filter provider: %v", err)
+	}
+
 	// Assign topic mapping
 	var topics []string
 	for t := range cfg.Topics {
@@ -85,18 +99,11 @@ func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
-	// setup logger
-	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
-		AddSource: false,
-		Level:     cfg.App.LogLevel,
-	}))
-
 	// create consumer manager
 	m := &consumerManager{mode: mode}
 
 	// setup consumer
-	m, err := initConsumer(ctx, m, cfg.Consumers, logger)
-	if err != nil {
+	if err := initConsumer(ctx, m, cfg.Consumers, logger); err != nil {
 		log.Fatalf("error starting consumer: %v", err)
 	}
 
@@ -125,6 +132,7 @@ func main() {
 
 		stopAtEnd:  stopAtEnd,
 		endOffsets: make(map[string]map[int32]int64),
+		filters:    filters,
 	}
 
 	// Start metrics handler
