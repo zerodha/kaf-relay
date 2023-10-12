@@ -235,7 +235,7 @@ func (h *consumerHook) OnBrokerDisconnect(meta kgo.BrokerMetadata, conn net.Conn
 }
 
 // initConsumer initalizes the consumer when the programs boots up.
-func initConsumer(ctx context.Context, m *consumerManager, cfgs []ConsumerGroupCfg, l *slog.Logger) (*consumerManager, error) {
+func initConsumer(ctx context.Context, m *consumerManager, cfgs []ConsumerGroupCfg, l *slog.Logger) error {
 	ctx, cancel := context.WithCancel(ctx)
 	c := consumer{
 		cfgs:      cfgs,
@@ -286,7 +286,7 @@ func initConsumer(ctx context.Context, m *consumerManager, cfgs []ConsumerGroupC
 
 	// return error if none of the brokers are available
 	if !brokerUp && err != nil {
-		return nil, err
+		return err
 	}
 
 	// set the default active consumer group
@@ -295,7 +295,7 @@ func initConsumer(ctx context.Context, m *consumerManager, cfgs []ConsumerGroupC
 
 	m.brokersUp = brokersUp
 
-	return m, nil
+	return nil
 }
 
 // setActive assigns current active index inside consumer manager
