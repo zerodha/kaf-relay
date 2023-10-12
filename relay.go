@@ -30,6 +30,10 @@ type relay struct {
 	retryBackoffFn func(int) time.Duration
 	maxRetries     int
 	retries        int
+
+	// Save the end offset of topic; decrement and make it easy to stop at 0
+	endOffsets map[string]map[int32]int64
+	stopAtEnd  bool
 }
 
 // Start starts the consumer loop on kafka (A), fetch messages and relays over to kafka (B) using an async producer.
@@ -37,6 +41,13 @@ func (r *relay) Start(ctx context.Context) error {
 	if err := r.validateOffsets(ctx); err != nil {
 		return err
 	}
+
+	// Flush the producer after the poll loop is over.
+	defer func() {
+		if err := r.producer.client.Flush(ctx); err != nil {
+			r.logger.Error("error while flushing the producer", "err", err)
+		}
+	}()
 
 pollLoop:
 	for {
@@ -54,6 +65,14 @@ pollLoop:
 			childCtx, _ := r.consumerMgr.getCurrentContext()
 			cl := r.consumerMgr.getCurrentClient()
 			r.consumerMgr.Unlock()
+
+			// Stop the poll loop if we reached the end of offsets fetched on boot.
+			if r.stopAtEnd {
+				if hasReachedEnd(r.endOffsets) {
+					r.logger.Debug("reached end of offsets; stopping relay", "broker", cl.OptValue(kgo.SeedBrokers), "offsets", r.endOffsets)
+					break pollLoop
+				}
+			}
 
 			r.logger.Debug("polling active consumer", "broker", cl.OptValue(kgo.SeedBrokers))
 			fetches := cl.PollFetches(childCtx)
@@ -96,6 +115,18 @@ pollLoop:
 			iter := fetches.RecordIter()
 			for !iter.Done() {
 				rec := iter.Next()
+
+				// Decrement the end offsets for the given topic, partition till we reach 0
+				if r.stopAtEnd {
+					if ct, ok := r.endOffsets[rec.Topic]; ok {
+						o := ct[rec.Partition]
+						if o > 0 {
+							o -= 1
+							ct[rec.Partition] = o
+							r.endOffsets[rec.Topic] = ct
+						}
+					}
+				}
 
 				// Fetch destination topic. Ignore if remapping is not defined.
 				t, ok := r.topics[rec.Topic]
@@ -155,6 +186,7 @@ func (r *relay) validateOffsets(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+
 	prodOffsets, err := getEndOffsets(ctx, r.producer.client, prodTopics)
 	if err != nil {
 		return err
@@ -167,6 +199,15 @@ func (r *relay) validateOffsets(ctx context.Context) error {
 
 	for _, ps := range consOffsets {
 		for _, o := range ps {
+			if r.stopAtEnd {
+				ct, ok := r.endOffsets[o.Topic]
+				if !ok {
+					ct = make(map[int32]int64)
+				}
+				ct[o.Partition] = o.Offset
+				r.endOffsets[o.Topic] = ct
+			}
+
 			// Check if mapping exists
 			t, ok := r.topics[o.Topic]
 			if !ok {
@@ -215,4 +256,17 @@ func getEndOffsets(ctx context.Context, client *kgo.Client, topics []string) (ka
 	}
 
 	return offsets, nil
+}
+
+// hasReachedEnd reports if there is any pending messages in given topic-partition
+func hasReachedEnd(offsets map[string]map[int32]int64) bool {
+	for _, p := range offsets {
+		for _, o := range p {
+			if o > 0 {
+				return false
+			}
+		}
+	}
+
+	return true
 }
