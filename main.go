@@ -37,11 +37,14 @@ func main() {
 	}
 
 	var (
-		configPath string
-		mode       string
+		configPath            string
+		mode                  string
+		checkpoint, stopAtEnd bool
 	)
 	f.StringVar(&configPath, "config", "config.toml", "Path to the TOML configuration file")
 	f.StringVar(&mode, "mode", "single", "single/failover")
+	f.BoolVar(&checkpoint, "checkpoint", false, "Use checkpoint file or not")
+	f.BoolVar(&stopAtEnd, "stop-at-end", false, "Stop relay at the end of offsets")
 	f.Bool("version", false, "Current version of the build")
 
 	if err := f.Parse(os.Args[1:]); err != nil {
@@ -97,9 +100,11 @@ func main() {
 		log.Fatalf("error starting consumer: %v", err)
 	}
 
-	// load checkpoint
-	if err := loadCheckpoint(cfg.App.Checkpoint, m, logger); err != nil {
-		log.Fatalf("error loading checkpoint: %v", err)
+	if checkpoint {
+		// load checkpoint
+		if err := loadCheckpoint(cfg.App.Checkpoint, m, logger); err != nil {
+			log.Fatalf("error loading checkpoint: %v", err)
+		}
 	}
 
 	// setup producer
@@ -117,6 +122,9 @@ func main() {
 
 		maxRetries:     cfg.App.MaxFailovers,
 		retryBackoffFn: retryBackoff(),
+
+		stopAtEnd:  stopAtEnd,
+		endOffsets: make(map[string]map[int32]int64),
 	}
 
 	// Start metrics handler
@@ -162,8 +170,10 @@ func main() {
 	}
 	p.client.Close()
 
-	// save the offsets to file
-	if err := saveCheckpoint(cfg.App.Checkpoint, m, logger); err != nil {
-		log.Fatalf("error saving checkpoint: %v", err)
+	if checkpoint {
+		// save the offsets to file
+		if err := saveCheckpoint(cfg.App.Checkpoint, m, logger); err != nil {
+			log.Fatalf("error saving checkpoint: %v", err)
+		}
 	}
 }

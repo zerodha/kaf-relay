@@ -9,6 +9,8 @@ Relay is a opinionated program designed to replicate messages on topics from one
 * Authentication: PLAIN, SCRAM-SHA-256, SCRAM-SHA-512
 * Topic Remapping: Relay allows you to specify topic remappings, enabling you to map a topic from the source cluster to a different topic in the destination cluster.
 * Consumer group failover: Assuming we have multiple identical kafkas (separate nodes 1...N) at the upstream side, this mode allows us to fallback to the next kafka in a round-robin fashion if current broker goes down. This allows us to deduplicate messages downstream without using any external stores.
+* Checkpoint: Flag `--checkpoint` allows the program to store the current consumer group, offsets into disk to resume from there at a later point.
+* Stop at end: Flag `--stop-at-end` allows the program to stop after reaching the end of consumer topic offsets that was picked up on boot.
 
 
 #### relay in different modes
