@@ -42,7 +42,7 @@ Create a configuration file named config.toml with the necessary settings. You c
 
 ### Filter plugins
 
-Build your own filter plugins by implementing `filter.Filter` interface.
+Build your own filter plugins by implementing `filter.Provider` interface.
 
 Sample
 ```golang
