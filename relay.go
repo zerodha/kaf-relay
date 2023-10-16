@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/VictoriaMetrics/metrics"
+	"github.com/joeirimpan/kaf-relay/filter"
 	"github.com/twmb/franz-go/pkg/kadm"
 	"github.com/twmb/franz-go/pkg/kgo"
 )
@@ -34,6 +35,9 @@ type relay struct {
 	// Save the end offset of topic; decrement and make it easy to stop at 0
 	endOffsets map[string]map[int32]int64
 	stopAtEnd  bool
+
+	// list of filter implementations for skipping messages
+	filters map[string]filter.Provider
 }
 
 // Start starts the consumer loop on kafka (A), fetch messages and relays over to kafka (B) using an async producer.
@@ -128,6 +132,20 @@ pollLoop:
 					}
 				}
 
+				// check if message needs to skipped?
+				msgAllowed := true
+				for n, f := range r.filters {
+					if !f.IsAllowed(rec.Value) {
+						r.logger.Debug("filtering message", "message", string(rec.Value), "filter", n)
+						msgAllowed = false
+						break
+					}
+				}
+
+				if !msgAllowed {
+					continue
+				}
+
 				// Fetch destination topic. Ignore if remapping is not defined.
 				t, ok := r.topics[rec.Topic]
 				if !ok {
@@ -199,6 +217,7 @@ func (r *relay) validateOffsets(ctx context.Context) error {
 
 	for _, ps := range consOffsets {
 		for _, o := range ps {
+			// store the end offsets
 			if r.stopAtEnd {
 				ct, ok := r.endOffsets[o.Topic]
 				if !ok {

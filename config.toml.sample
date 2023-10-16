@@ -73,3 +73,20 @@ client_cert_path = ""
 ca_cert_path = ""
 
 enable_log = false
+
+
+[filter.testfilter]
+config = '''
+{
+    "address": ["127.0.0.1:6379"],
+    "username": "",
+    "password": "",
+    "db": 10,
+    "max_active": 50,
+    "max_idle": 20,
+    "dial_timeout": 3000,
+    "read_timeout": 3000,
+    "write_timeout": 3000,
+    "idle_timeout": 30000
+}
+'''
