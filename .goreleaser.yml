@@ -10,10 +10,7 @@ builds:
     main: .
     goos:
       - windows
-      - darwin
       - linux
-      - freebsd
-      - openbsd
       - netbsd
     goarch:
       - amd64
