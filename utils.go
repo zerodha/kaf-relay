@@ -12,6 +12,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/twmb/franz-go/pkg/kadm"
 	"github.com/twmb/franz-go/pkg/kerr"
 	"github.com/twmb/franz-go/pkg/kgo"
 	"github.com/twmb/franz-go/pkg/kmsg"
@@ -221,4 +222,57 @@ func waitTries(ctx context.Context, b time.Duration) {
 		return
 	case <-after.C:
 	}
+}
+
+func thresholdExceeded(offsetsX, offsetsY kadm.ListedOffsets, max int64) bool {
+	for t, po := range offsetsX {
+		for p, x := range po {
+			y, ok := offsetsY.Lookup(t, p)
+			if !ok {
+				continue
+			}
+
+			// check if the difference is breaching threshold
+			if y.Offset < x.Offset {
+				if (x.Offset - y.Offset) >= max {
+					return true
+				}
+			}
+		}
+	}
+
+	return false
+}
+
+func getCommittedOffsets(ctx context.Context, client *kgo.Client, topics []string) (kadm.ListedOffsets, error) {
+	adm := kadm.NewClient(client)
+	offsets, err := adm.ListCommittedOffsets(ctx, topics...)
+	if err != nil {
+		return nil, fmt.Errorf("error listing committed offsets of topics(%v): %v", topics, err)
+	}
+
+	return offsets, nil
+}
+
+func getEndOffsets(ctx context.Context, client *kgo.Client, topics []string) (kadm.ListedOffsets, error) {
+	adm := kadm.NewClient(client)
+	offsets, err := adm.ListEndOffsets(ctx, topics...)
+	if err != nil {
+		return nil, fmt.Errorf("error listing end offsets of topics(%v): %v", topics, err)
+	}
+
+	return offsets, nil
+}
+
+// hasReachedEnd reports if there is any pending messages in given topic-partition
+func hasReachedEnd(offsets map[string]map[int32]int64) bool {
+	for _, p := range offsets {
+		for _, o := range p {
+			if o > 0 {
+				return false
+			}
+		}
+	}
+
+	return true
 }

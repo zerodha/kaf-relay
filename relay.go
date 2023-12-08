@@ -6,6 +6,9 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/VictoriaMetrics/metrics"
@@ -36,6 +39,10 @@ type relay struct {
 	endOffsets map[string]map[int32]int64
 	stopAtEnd  bool
 
+	// monitor lags
+	lagThreshold   int64
+	lagMonitorFreq time.Duration
+
 	// list of filter implementations for skipping messages
 	filters map[string]filter.Provider
 }
@@ -44,6 +51,13 @@ type relay struct {
 func (r *relay) Start(ctx context.Context) error {
 	if err := r.validateOffsets(ctx); err != nil {
 		return err
+	}
+
+	wg := &sync.WaitGroup{}
+	// track topic lag and switch over the client if needed.
+	if r.lagThreshold > 0 {
+		wg.Add(1)
+		go r.trackTopicLag(ctx, wg)
 	}
 
 	// Flush the producer after the poll loop is over.
@@ -64,10 +78,14 @@ pollLoop:
 		case <-ctx.Done():
 			break pollLoop
 		default:
-			// get consumer specific context, client
+			// get consumer specific context, client, config
 			r.consumerMgr.Lock()
-			childCtx, _ := r.consumerMgr.getCurrentContext()
-			cl := r.consumerMgr.getCurrentClient()
+			var (
+				childCtx, _  = r.consumerMgr.getCurrentContext()
+				cl           = r.consumerMgr.getCurrentClient()
+				cfg          = r.consumerMgr.getCurrentConfig()
+				manualCommit = cfg.OffsetCommitInterval == 0
+			)
 			r.consumerMgr.Unlock()
 
 			// Stop the poll loop if we reached the end of offsets fetched on boot.
@@ -171,11 +189,13 @@ pollLoop:
 					}
 
 					// Mark / commit offsets
-					r.consumerMgr.commit(rec)
+					r.consumerMgr.commit(childCtx, cl, rec, manualCommit)
 				})
 			}
 		}
 	}
+
+	wg.Wait()
 
 	return nil
 }
@@ -183,6 +203,115 @@ pollLoop:
 // getMetrics writes the internal prom metrics to the given io.Writer
 func (r *relay) getMetrics(buf io.Writer) {
 	r.metrics.WritePrometheus(buf)
+}
+
+// trackTopicLag tracks the topic lag between servers and switches over if threshold breached.
+func (r *relay) trackTopicLag(ctx context.Context, wg *sync.WaitGroup) {
+	tick := time.NewTicker(r.lagMonitorFreq)
+	defer tick.Stop()
+	defer wg.Done()
+
+	// XXX: Create separate clients for tracking offsets to prevent locking
+	// main consumer manager.
+	// create a copy of the consumer configs
+	r.consumerMgr.Lock()
+	cfgs := make([]ConsumerGroupCfg, len(r.consumerMgr.c.cfgs))
+	copy(cfgs, r.consumerMgr.c.cfgs)
+	r.consumerMgr.Unlock()
+
+	// create admin clients for these configs
+	clients := make([]*kadm.Client, len(cfgs))
+	for i, cfg := range cfgs {
+		cl, err := getClient(cfg)
+		if err != nil {
+			r.logger.Error("error creating admin client for tracking lag", "err", err)
+			continue
+		}
+		clients[i] = kadm.NewClient(cl)
+	}
+
+loop:
+	for {
+		select {
+		case <-ctx.Done():
+			break loop
+
+		case <-tick.C:
+			r.logger.Debug("checking topic lag", "freq", r.lagMonitorFreq.Seconds())
+
+			r.consumerMgr.Lock()
+			curr := r.consumerMgr.Index()
+			r.consumerMgr.Unlock()
+			var (
+				n           = len(cfgs)
+				currOffsets kadm.ListedOffsets
+			)
+		lagCheck:
+			for i := 0; i < n; i++ {
+				idx := (curr + i) % n // wraparound
+				cl := clients[idx]
+				if cl == nil {
+					continue
+				}
+				cfg := cfgs[idx]
+
+				up := false
+				for _, addr := range cfg.BootstrapBrokers {
+					if conn, err := net.DialTimeout("tcp", addr, time.Second); err != nil && checkErr(err) {
+						up = false
+					} else {
+						conn.Close()
+						up = true
+						break
+					}
+				}
+
+				// skip pulling offsets if the nodes are not up
+				if !up {
+					continue
+				}
+
+				of, err := cl.ListEndOffsets(ctx, cfg.Topics...)
+				if err != nil {
+					r.logger.Error("error fetching end offsets; tracking topic lag", "err", err)
+					continue lagCheck
+				}
+
+				if idx == curr {
+					currOffsets = of
+					continue lagCheck
+				}
+
+				if currOffsets != nil && thresholdExceeded(of, currOffsets, r.lagThreshold) {
+					setup := func() {
+						atomic.CompareAndSwapUint32(&r.consumerMgr.reconnectInProgress, StateConnected, StateConnecting)
+						r.consumerMgr.Lock()
+					}
+					cleanup := func() {
+						r.consumerMgr.Unlock()
+						atomic.CompareAndSwapUint32(&r.consumerMgr.reconnectInProgress, StateConnecting, StateConnected)
+					}
+
+					setup()
+					// get the current polling context and cancel to break the current poll loop
+					addrs := r.consumerMgr.getClient(idx).OptValue(kgo.SeedBrokers)
+					r.logger.Debug("lag threshold exceeded; switching over", "broker", addrs)
+
+					r.consumerMgr.setActive(idx - 1)
+					if err := r.consumerMgr.connect(); err != nil {
+						cleanup()
+						continue lagCheck
+					}
+
+					cancelFn := r.consumerMgr.getCancelFn(curr)
+					cancelFn()
+
+					cleanup()
+					break lagCheck
+				}
+			}
+		}
+	}
 }
 
 // validateOffsets makes sure that source, destination has same topic, partitions.
@@ -196,10 +325,7 @@ func (r *relay) validateOffsets(ctx context.Context) error {
 		prodTopics = append(prodTopics, p)
 	}
 
-	r.consumerMgr.Lock()
 	c := r.consumerMgr.getCurrentClient()
-	r.consumerMgr.Unlock()
-
 	consOffsets, err := getEndOffsets(ctx, c, consTopics)
 	if err != nil {
 		return err
@@ -255,37 +381,4 @@ func (r *relay) validateOffsets(ctx context.Context) error {
 	}
 
 	return nil
-}
-
-func getCommittedOffsets(ctx context.Context, client *kgo.Client, topics []string) (kadm.ListedOffsets, error) {
-	adm := kadm.NewClient(client)
-	offsets, err := adm.ListCommittedOffsets(ctx, topics...)
-	if err != nil {
-		return nil, fmt.Errorf("error listing committed offsets of topics(%v): %v", topics, err)
-	}
-
-	return offsets, nil
-}
-
-func getEndOffsets(ctx context.Context, client *kgo.Client, topics []string) (kadm.ListedOffsets, error) {
-	adm := kadm.NewClient(client)
-	offsets, err := adm.ListEndOffsets(ctx, topics...)
-	if err != nil {
-		return nil, fmt.Errorf("error listing end offsets of topics(%v): %v", topics, err)
-	}
-
-	return offsets, nil
-}
-
-// hasReachedEnd reports if there is any pending messages in given topic-partition
-func hasReachedEnd(offsets map[string]map[int32]int64) bool {
-	for _, p := range offsets {
-		for _, o := range p {
-			if o > 0 {
-				return false
-			}
-		}
-	}
-
-	return true
 }
