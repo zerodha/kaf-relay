@@ -39,6 +39,20 @@ func initProducer(cfg ProducerCfg, l *slog.Logger) (*producer, error) {
 		opts = appendSASL(opts, cfg.ClientCfg)
 	}
 
+	if cfg.EnableTLS {
+		if cfg.CACertPath == "" && cfg.ClientCertPath == "" && cfg.ClientKeyPath == "" {
+			opts = append(opts, kgo.DialTLS())
+		} else {
+			tlsOpt, err := createTLSConfig(cfg.CACertPath, cfg.ClientCertPath, cfg.ClientKeyPath)
+			if err != nil {
+				return nil, err
+			}
+
+			// Set up TLS configuration
+			opts = append(opts, tlsOpt)
+		}
+	}
+
 	client, err := kgo.NewClient(opts...)
 	if err != nil {
 		return nil, err
