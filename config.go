@@ -49,10 +49,10 @@ type ClientCfg struct {
 	// If enabled and the three files are passed, will
 	// use the relevant certs and keys. If enabled but all three
 	// file paths are empty, it will default to using DialTLS()
-	EnableTLS      bool   `json:"enable_tls"`
-	ClientKeyPath  string `json:"client_key_path"`
-	ClientCertPath string `json:"client_cert_path"`
-	CACertPath     string `json:"ca_cert_path"`
+	EnableTLS      bool   `koanf:"enable_tls"`
+	ClientKeyPath  string `koanf:"client_key_path"`
+	ClientCertPath string `koanf:"client_cert_path"`
+	CACertPath     string `koanf:"ca_cert_path"`
 
 	EnableLog bool `koanf:"enable_log"`
 }
