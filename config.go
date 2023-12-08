@@ -28,6 +28,9 @@ type AppCfg struct {
 
 	LogLevel          slog.Level `koanf:"log_level"`
 	MetricsServerAddr string     `koanf:"metrics_server_addr"`
+
+	LagThreshold   int64         `koanf:"lag_threshold"`
+	LagMonitorFreq time.Duration `koanf:"lag_monitor_frequency"`
 }
 
 // ClientCfg is the message broker's client config.

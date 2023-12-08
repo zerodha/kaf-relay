@@ -12,6 +12,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/twmb/franz-go/pkg/kadm"
 	"github.com/twmb/franz-go/pkg/kerr"
 	"github.com/twmb/franz-go/pkg/kgo"
 	"github.com/twmb/franz-go/pkg/kmsg"
@@ -221,4 +222,24 @@ func waitTries(ctx context.Context, b time.Duration) {
 		return
 	case <-after.C:
 	}
+}
+
+func thresholdExceeded(offsetsX, offsetsY kadm.ListedOffsets, max int64) bool {
+	for t, po := range offsetsX {
+		for p, x := range po {
+			y, ok := offsetsY.Lookup(t, p)
+			if !ok {
+				continue
+			}
+
+			// check if the difference is breaching threshold
+			if y.Offset < x.Offset {
+				if (x.Offset - y.Offset) >= max {
+					return true
+				}
+			}
+		}
+	}
+
+	return false
 }

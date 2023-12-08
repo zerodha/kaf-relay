@@ -130,6 +130,9 @@ func main() {
 		maxRetries:     cfg.App.MaxFailovers,
 		retryBackoffFn: retryBackoff(),
 
+		lagMonitorFreq: cfg.App.LagMonitorFreq,
+		lagThreshold:   cfg.App.LagThreshold,
+
 		stopAtEnd:  stopAtEnd,
 		endOffsets: make(map[string]map[int32]int64),
 		filters:    filters,

@@ -196,9 +196,11 @@ func (h *consumerHook) OnBrokerDisconnect(meta kgo.BrokerMetadata, conn net.Conn
 	// Confirm that the broker really went down?
 	down := false
 	l.Debug("another attempt at connecting...")
-	if _, err := net.DialTimeout("tcp", addr, time.Second); err != nil && checkErr(err) {
+	if conn, err := net.DialTimeout("tcp", addr, time.Second); err != nil && checkErr(err) {
 		l.Error("connection failed", "err", err)
 		down = true
+	} else {
+		conn.Close()
 	}
 
 	// reconnect with next node
@@ -310,18 +312,21 @@ func (m *consumerManager) connect() error {
 	m.c.nodeIncr()
 
 	var (
-		cfg = m.getCurrentConfig()
-		cl  = m.getCurrentClient()
-		l   = m.c.logger
-		err error
+		cfg  = m.getCurrentConfig()
+		cl   = m.getCurrentClient()
+		l    = m.c.logger
+		err  error
+		conn net.Conn
 	)
 
 	l.Debug("attempting to connect to broker", "broker", cfg.BootstrapBrokers, "group_id", cfg.GroupID)
 	up := false
 	for _, addr := range cfg.BootstrapBrokers {
-		_, err = net.DialTimeout("tcp", addr, time.Second)
-		if err == nil {
+		if conn, err = net.DialTimeout("tcp", addr, time.Second); err != nil && checkErr(err) {
+			up = false
+		} else {
 			up = true
+			conn.Close()
 			break
 		}
 	}
