@@ -279,21 +279,30 @@ loop:
 				}
 
 				if currOffsets != nil && thresholdExceeded(of, currOffsets, r.lagThreshold) {
-					atomic.CompareAndSwapUint32(&r.consumerMgr.reconnectInProgress, StateConnected, StateConnecting)
-					// get the current polling context and cancel to break the current poll loop
-					r.consumerMgr.Lock()
+					setup := func() {
+						atomic.CompareAndSwapUint32(&r.consumerMgr.reconnectInProgress, StateConnected, StateConnecting)
+						r.consumerMgr.Lock()
+					}
+					cleanup := func() {
+						r.consumerMgr.Unlock()
+						atomic.CompareAndSwapUint32(&r.consumerMgr.reconnectInProgress, StateConnecting, StateConnected)
+					}
 
+					setup()
+					// get the current polling context and cancel to break the current poll loop
 					addrs := r.consumerMgr.c.clients[idx].OptValue(kgo.SeedBrokers)
 					r.logger.Debug("lag threshold exceeded; switching over", "broker", addrs)
 
 					r.consumerMgr.setActive(idx - 1)
-					r.consumerMgr.connect()
+					if err := r.consumerMgr.connect(); err != nil {
+						cleanup()
+						continue lagCheck
+					}
 
 					cancelFn := r.consumerMgr.c.cancelFn[curr]
 					cancelFn()
 
-					r.consumerMgr.Unlock()
-					atomic.CompareAndSwapUint32(&r.consumerMgr.reconnectInProgress, StateConnecting, StateConnected)
+					cleanup()
 					break lagCheck
 				}
 			}
