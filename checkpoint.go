@@ -50,7 +50,6 @@ func loadCheckpoint(path string, manager *consumerManager, l *slog.Logger) error
 	manager.Lock()
 	defer manager.Unlock()
 
-	manager.currentGroupID = c.GroupID
 	if c.Offsets != nil {
 		manager.setOffsets(c.Offsets)
 	}

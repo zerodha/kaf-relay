@@ -78,10 +78,14 @@ pollLoop:
 		case <-ctx.Done():
 			break pollLoop
 		default:
-			// get consumer specific context, client
+			// get consumer specific context, client, config
 			r.consumerMgr.Lock()
-			childCtx, _ := r.consumerMgr.getCurrentContext()
-			cl := r.consumerMgr.getCurrentClient()
+			var (
+				childCtx, _  = r.consumerMgr.getCurrentContext()
+				cl           = r.consumerMgr.getCurrentClient()
+				cfg          = r.consumerMgr.getCurrentConfig()
+				manualCommit = cfg.OffsetCommitInterval == 0
+			)
 			r.consumerMgr.Unlock()
 
 			// Stop the poll loop if we reached the end of offsets fetched on boot.
@@ -185,7 +189,7 @@ pollLoop:
 					}
 
 					// Mark / commit offsets
-					r.consumerMgr.commit(rec)
+					r.consumerMgr.commit(childCtx, cl, rec, manualCommit)
 				})
 			}
 		}
@@ -236,7 +240,7 @@ loop:
 			r.logger.Debug("checking topic lag", "freq", r.lagMonitorFreq.Seconds())
 
 			r.consumerMgr.Lock()
-			curr := r.consumerMgr.c.idx
+			curr := r.consumerMgr.Index()
 			r.consumerMgr.Unlock()
 			var (
 				n           = len(cfgs)
@@ -290,7 +294,7 @@ loop:
 
 					setup()
 					// get the current polling context and cancel to break the current poll loop
-					addrs := r.consumerMgr.c.clients[idx].OptValue(kgo.SeedBrokers)
+					addrs := r.consumerMgr.getClient(idx).OptValue(kgo.SeedBrokers)
 					r.logger.Debug("lag threshold exceeded; switching over", "broker", addrs)
 
 					r.consumerMgr.setActive(idx - 1)
@@ -299,7 +303,7 @@ loop:
 						continue lagCheck
 					}
 
-					cancelFn := r.consumerMgr.c.cancelFn[curr]
+					cancelFn := r.consumerMgr.getCancelFn(curr)
 					cancelFn()
 
 					cleanup()
@@ -321,10 +325,7 @@ func (r *relay) validateOffsets(ctx context.Context) error {
 		prodTopics = append(prodTopics, p)
 	}
 
-	r.consumerMgr.Lock()
 	c := r.consumerMgr.getCurrentClient()
-	r.consumerMgr.Unlock()
-
 	consOffsets, err := getEndOffsets(ctx, c, consTopics)
 	if err != nil {
 		return err
@@ -380,37 +381,4 @@ func (r *relay) validateOffsets(ctx context.Context) error {
 	}
 
 	return nil
-}
-
-func getCommittedOffsets(ctx context.Context, client *kgo.Client, topics []string) (kadm.ListedOffsets, error) {
-	adm := kadm.NewClient(client)
-	offsets, err := adm.ListCommittedOffsets(ctx, topics...)
-	if err != nil {
-		return nil, fmt.Errorf("error listing committed offsets of topics(%v): %v", topics, err)
-	}
-
-	return offsets, nil
-}
-
-func getEndOffsets(ctx context.Context, client *kgo.Client, topics []string) (kadm.ListedOffsets, error) {
-	adm := kadm.NewClient(client)
-	offsets, err := adm.ListEndOffsets(ctx, topics...)
-	if err != nil {
-		return nil, fmt.Errorf("error listing end offsets of topics(%v): %v", topics, err)
-	}
-
-	return offsets, nil
-}
-
-// hasReachedEnd reports if there is any pending messages in given topic-partition
-func hasReachedEnd(offsets map[string]map[int32]int64) bool {
-	for _, p := range offsets {
-		for _, o := range p {
-			if o > 0 {
-				return false
-			}
-		}
-	}
-
-	return true
 }

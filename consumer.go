@@ -27,7 +27,6 @@ type consumerManager struct {
 	c  *consumer
 
 	reconnectInProgress uint32
-	currentGroupID      string
 
 	// single/failover
 	mode      string
@@ -60,6 +59,10 @@ func (m *consumerManager) Unlock() {
 	m.mu.Unlock()
 }
 
+func (m *consumerManager) Index() int {
+	return m.c.idx
+}
+
 // getOffsets returns the current offsets
 func (m *consumerManager) getOffsets() map[string]map[int32]kgo.EpochOffset {
 	return m.c.offsets
@@ -73,6 +76,16 @@ func (m *consumerManager) setOffsets(o map[string]map[int32]kgo.EpochOffset) {
 // getCurrentConfig returns the current consumer group config.
 func (m *consumerManager) getCurrentConfig() ConsumerGroupCfg {
 	return m.c.cfgs[m.c.idx]
+}
+
+// getClient returns the client for given index.
+func (m *consumerManager) getClient(idx int) *kgo.Client {
+	return m.c.clients[idx]
+}
+
+// getCancelFn returns the current context cancel fn for given client index.
+func (m *consumerManager) getCancelFn(idx int) context.CancelFunc {
+	return m.c.cancelFn[idx]
 }
 
 // getCurrentClient returns current client.
@@ -97,16 +110,10 @@ func (m *consumerManager) setCurrentContext(ctx context.Context, cancel context.
 }
 
 // commits marks/sync commit the offsets for autocommit/non-autocommit respectively
-func (m *consumerManager) commit(r *kgo.Record) {
-	m.Lock()
-	cfg := m.getCurrentConfig()
-	ctx, _ := m.getCurrentContext()
-	cl := m.getCurrentClient()
-	m.Unlock()
-
+func (m *consumerManager) commit(ctx context.Context, cl *kgo.Client, r *kgo.Record, manualCommit bool) {
 	// If autocommit is disabled allow committing directly,
 	// or else just mark the message to commit.
-	if cfg.OffsetCommitInterval == 0 {
+	if manualCommit {
 		oMap := make(map[int32]kgo.EpochOffset)
 		oMap[r.Partition] = kgo.EpochOffset{
 			Epoch:  r.LeaderEpoch,
@@ -116,6 +123,12 @@ func (m *consumerManager) commit(r *kgo.Record) {
 		tOMap[r.Topic] = oMap
 		cl.CommitOffsetsSync(ctx, tOMap,
 			func(cl *kgo.Client, ocr1 *kmsg.OffsetCommitRequest, ocr2 *kmsg.OffsetCommitResponse, err error) {
+				if err != nil {
+					m.c.logger.Error("error committing offsets", "err", err)
+					return
+				}
+
+				m.Lock()
 				// keep offsets in memory
 				if m.c.offsets != nil {
 					m.c.offsets[r.Topic] = oMap
@@ -123,6 +136,7 @@ func (m *consumerManager) commit(r *kgo.Record) {
 					m.c.offsets = make(map[string]map[int32]kgo.EpochOffset)
 					m.c.offsets[r.Topic] = oMap
 				}
+				m.Unlock()
 			},
 		)
 		return
