@@ -3,7 +3,6 @@ package main
 import (
 	"bytes"
 	"context"
-	"encoding/gob"
 	"fmt"
 	"log"
 	"log/slog"
@@ -23,10 +22,6 @@ import (
 var (
 	buildString = "unknown"
 )
-
-func init() {
-	gob.Register(checkPoint{})
-}
 
 func main() {
 	// Initialize config
@@ -100,18 +95,11 @@ func main() {
 	defer cancel()
 
 	// create consumer manager
-	m := &consumerManager{mode: mode}
+	m := &consumerManager{mode: mode, reconnectInProgress: StateDisconnected}
 
 	// setup consumer
-	if err := initConsumer(ctx, m, cfg.Consumers, logger); err != nil {
+	if err := initConsumer(ctx, m, cfg.Consumers, cfg.App.MaxFailovers, logger); err != nil {
 		log.Fatalf("error starting consumer: %v", err)
-	}
-
-	if checkpoint {
-		// load checkpoint
-		if err := loadCheckpoint(cfg.App.Checkpoint, m, logger); err != nil {
-			log.Fatalf("error loading checkpoint: %v", err)
-		}
 	}
 
 	// setup producer
@@ -180,11 +168,4 @@ func main() {
 		cl.Close()
 	}
 	p.client.Close()
-
-	if checkpoint {
-		// save the offsets to file
-		if err := saveCheckpoint(cfg.App.Checkpoint, m, logger); err != nil {
-			log.Fatalf("error saving checkpoint: %v", err)
-		}
-	}
 }

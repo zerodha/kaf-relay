@@ -49,6 +49,17 @@ type relay struct {
 
 // Start starts the consumer loop on kafka (A), fetch messages and relays over to kafka (B) using an async producer.
 func (r *relay) Start(ctx context.Context) error {
+	var prodTopics = make([]string, len(r.topics))
+	for k := range r.topics {
+		prodTopics = append(prodTopics, k)
+	}
+
+	prodOffsets, err := getEndOffsets(ctx, r.producer.client, prodTopics)
+	if err != nil {
+		return err
+	}
+
+	r.consumerMgr.setOffsets(prodOffsets.KOffsets())
 	if err := r.validateOffsets(ctx); err != nil {
 		return err
 	}
@@ -70,7 +81,7 @@ func (r *relay) Start(ctx context.Context) error {
 pollLoop:
 	for {
 		// exit if max retries is exhausted
-		if r.retries >= r.maxRetries {
+		if r.retries >= r.maxRetries && r.maxRetries != IndefiniteRetry {
 			return fmt.Errorf("`max_retries`(%d) exhausted; exiting relay", r.maxRetries)
 		}
 
@@ -81,17 +92,15 @@ pollLoop:
 			// get consumer specific context, client, config
 			r.consumerMgr.Lock()
 			var (
-				childCtx, _  = r.consumerMgr.getCurrentContext()
-				cl           = r.consumerMgr.getCurrentClient()
-				cfg          = r.consumerMgr.getCurrentConfig()
-				manualCommit = cfg.OffsetCommitInterval == 0
+				childCtx, _ = r.consumerMgr.getCurrentContext()
+				cl          = r.consumerMgr.getCurrentClient()
 			)
 			r.consumerMgr.Unlock()
 
 			// Stop the poll loop if we reached the end of offsets fetched on boot.
 			if r.stopAtEnd {
 				if hasReachedEnd(r.endOffsets) {
-					r.logger.Debug("reached end of offsets; stopping relay", "broker", cl.OptValue(kgo.SeedBrokers), "offsets", r.endOffsets)
+					r.logger.Info("reached end of offsets; stopping relay", "broker", cl.OptValue(kgo.SeedBrokers), "offsets", r.endOffsets)
 					break pollLoop
 				}
 			}
@@ -111,24 +120,18 @@ pollLoop:
 			errs := fetches.Errors()
 			for _, err := range errs {
 				if errors.Is(err.Err, kgo.ErrClientClosed) {
-					r.retries++
-					waitTries(ctx, r.retryBackoffFn(r.retries))
-
-					r.logger.Debug("consumer group fetch error client closed", "broker", cl.OptValue(kgo.SeedBrokers))
-					continue pollLoop
+					r.logger.Info("consumer group fetch error client closed", "broker", cl.OptValue(kgo.SeedBrokers))
 				}
 
 				if errors.Is(err.Err, context.Canceled) {
-					r.retries++
-					waitTries(ctx, r.retryBackoffFn(r.retries))
-
-					r.logger.Debug("consumer group fetch error client context cancelled", "broker", cl.OptValue(kgo.SeedBrokers))
-					continue pollLoop
+					r.logger.Info("consumer group fetch error client context cancelled", "broker", cl.OptValue(kgo.SeedBrokers))
 				}
 
 				r.retries++
 				waitTries(ctx, r.retryBackoffFn(r.retries))
 				r.logger.Error("error while consuming", "err", err.Err)
+
+				continue pollLoop
 			}
 
 			// reset max retries if successfull
@@ -188,8 +191,7 @@ pollLoop:
 						return
 					}
 
-					// Mark / commit offsets
-					r.consumerMgr.commit(childCtx, cl, rec, manualCommit)
+					r.consumerMgr.setTopicOffsets(rec)
 				})
 			}
 		}
@@ -284,21 +286,22 @@ loop:
 
 				if currOffsets != nil && thresholdExceeded(of, currOffsets, r.lagThreshold) {
 					setup := func() {
-						atomic.CompareAndSwapUint32(&r.consumerMgr.reconnectInProgress, StateConnected, StateConnecting)
+						atomic.CompareAndSwapUint32(&r.consumerMgr.reconnectInProgress, StateDisconnected, StateConnecting)
 						r.consumerMgr.Lock()
 					}
 					cleanup := func() {
 						r.consumerMgr.Unlock()
-						atomic.CompareAndSwapUint32(&r.consumerMgr.reconnectInProgress, StateConnecting, StateConnected)
+						atomic.CompareAndSwapUint32(&r.consumerMgr.reconnectInProgress, StateConnecting, StateDisconnected)
 					}
 
 					setup()
 					// get the current polling context and cancel to break the current poll loop
 					addrs := r.consumerMgr.getClient(idx).OptValue(kgo.SeedBrokers)
-					r.logger.Debug("lag threshold exceeded; switching over", "broker", addrs)
+					r.logger.Info("lag threshold exceeded; switching over", "broker", addrs)
 
 					r.consumerMgr.setActive(idx - 1)
-					if err := r.consumerMgr.connect(); err != nil {
+					if err := r.consumerMgr.connectToNextNode(); err != nil {
+						r.consumerMgr.setActive(curr)
 						cleanup()
 						continue lagCheck
 					}
@@ -336,11 +339,6 @@ func (r *relay) validateOffsets(ctx context.Context) error {
 		return err
 	}
 
-	commitOffsets, err := getCommittedOffsets(ctx, c, consTopics)
-	if err != nil {
-		return err
-	}
-
 	for _, ps := range consOffsets {
 		for _, o := range ps {
 			// store the end offsets
@@ -366,16 +364,9 @@ func (r *relay) validateOffsets(ctx context.Context) error {
 			}
 
 			// Confirm that committed offsets of consumer group matches the offsets of destination kafka topic partition
-			if destOffset.Offset > 0 {
-				o, ok := commitOffsets.Lookup(o.Topic, destOffset.Partition)
-				if !ok {
-					return fmt.Errorf("error finding topic, partition for %v in source kafka", o.Topic)
-				}
-
-				if destOffset.Offset > o.Offset {
-					return fmt.Errorf("destination topic(%v), partition(%v) offsets(%v) is higher than consumer group committed offsets(%v)",
-						destOffset.Topic, destOffset.Partition, destOffset.Offset, o.Offset)
-				}
+			if destOffset.Offset > o.Offset {
+				return fmt.Errorf("destination topic(%v), partition(%v) offsets(%v) is higher than consumer group committed offsets(%v)",
+					destOffset.Topic, destOffset.Partition, destOffset.Offset, o.Offset)
 			}
 		}
 	}

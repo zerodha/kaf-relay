@@ -21,9 +21,13 @@ import (
 )
 
 const (
-	ModeFailover = "failover"
+	ModeFailover    = "failover"
+	ModeSingle      = "single"
+	IndefiniteRetry = -1
+)
 
-	StateConnected = iota - 1
+const (
+	StateDisconnected = iota
 	StateConnecting
 )
 
