@@ -190,6 +190,7 @@ pollLoop:
 
 					// Mark / commit offsets
 					r.consumerMgr.commit(childCtx, cl, rec, manualCommit)
+					r.consumerMgr.SetTopicOffsets(rec)
 				})
 			}
 		}

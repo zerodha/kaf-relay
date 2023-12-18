@@ -68,6 +68,26 @@ func (m *consumerManager) getOffsets() map[string]map[int32]kgo.EpochOffset {
 	return m.c.offsets
 }
 
+// SetTopicOffsets accepts a kafka record and updates/sets the topic offset
+// map
+func (m *consumerManager) SetTopicOffsets(rec *kgo.Record) {
+	oMap := make(map[int32]kgo.EpochOffset)
+	oMap[rec.Partition] = kgo.EpochOffset{
+		Epoch:  rec.LeaderEpoch,
+		Offset: rec.Offset + 1,
+	}
+
+	m.Lock()
+	// keep offsets in memory
+	if m.c.offsets != nil {
+		m.c.offsets[rec.Topic] = oMap
+	} else {
+		m.c.offsets = make(map[string]map[int32]kgo.EpochOffset)
+		m.c.offsets[rec.Topic] = oMap
+	}
+	m.Unlock()
+}
+
 // setOffsets set the current offsets into relay struct
 func (m *consumerManager) setOffsets(o map[string]map[int32]kgo.EpochOffset) {
 	m.c.offsets = o
@@ -121,22 +141,13 @@ func (m *consumerManager) commit(ctx context.Context, cl *kgo.Client, r *kgo.Rec
 		}
 		tOMap := make(map[string]map[int32]kgo.EpochOffset)
 		tOMap[r.Topic] = oMap
-		cl.CommitOffsetsSync(ctx, tOMap,
+		cl.CommitOffsets(ctx, tOMap,
 			func(cl *kgo.Client, ocr1 *kmsg.OffsetCommitRequest, ocr2 *kmsg.OffsetCommitResponse, err error) {
 				if err != nil {
 					m.c.logger.Error("error committing offsets", "err", err)
 					return
 				}
 
-				m.Lock()
-				// keep offsets in memory
-				if m.c.offsets != nil {
-					m.c.offsets[r.Topic] = oMap
-				} else {
-					m.c.offsets = make(map[string]map[int32]kgo.EpochOffset)
-					m.c.offsets[r.Topic] = oMap
-				}
-				m.Unlock()
 			},
 		)
 		return
