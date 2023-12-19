@@ -100,7 +100,7 @@ func main() {
 	defer cancel()
 
 	// create consumer manager
-	m := &consumerManager{mode: mode}
+	m := &consumerManager{mode: mode, reconnectInProgress: StateDisconnected}
 
 	// setup consumer
 	if err := initConsumer(ctx, m, cfg.Consumers, logger); err != nil {

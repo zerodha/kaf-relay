@@ -157,13 +157,13 @@ type consumerHook struct {
 // It checks the disconnection status, verifies the broker's state, and initiates reconnection if necessary.
 func (h *consumerHook) OnBrokerDisconnect(meta kgo.BrokerMetadata, conn net.Conn) {
 	// Prevent concurrent access of consumer manager when a reconnect is in progress
-	if !atomic.CompareAndSwapUint32(&h.m.reconnectInProgress, StateConnected, StateConnecting) {
+	if !atomic.CompareAndSwapUint32(&h.m.reconnectInProgress, StateDisconnected, StateConnecting) {
 		h.m.c.logger.Debug("reconnect in progress; ignore OnBrokerDisconnect callback")
 		return
 	}
 
 	// flip the bit back to initial state
-	defer atomic.CompareAndSwapUint32(&h.m.reconnectInProgress, StateConnecting, StateConnected)
+	defer atomic.CompareAndSwapUint32(&h.m.reconnectInProgress, StateConnecting, StateDisconnected)
 
 	// lock before we attempting to replace the underlying client
 	h.m.Lock()
