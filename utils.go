@@ -24,7 +24,7 @@ const (
 	ModeFailover = "failover"
 	ModeSingle   = "single"
 
-	StateConnected = iota - 1
+	StateDisconnected = iota - 1
 	StateConnecting
 )
 

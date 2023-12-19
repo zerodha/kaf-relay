@@ -281,12 +281,12 @@ loop:
 
 				if currOffsets != nil && thresholdExceeded(of, currOffsets, r.lagThreshold) {
 					setup := func() {
-						atomic.CompareAndSwapUint32(&r.consumerMgr.reconnectInProgress, StateConnected, StateConnecting)
+						atomic.CompareAndSwapUint32(&r.consumerMgr.reconnectInProgress, StateDisconnected, StateConnecting)
 						r.consumerMgr.Lock()
 					}
 					cleanup := func() {
 						r.consumerMgr.Unlock()
-						atomic.CompareAndSwapUint32(&r.consumerMgr.reconnectInProgress, StateConnecting, StateConnected)
+						atomic.CompareAndSwapUint32(&r.consumerMgr.reconnectInProgress, StateConnecting, StateDisconnected)
 					}
 
 					setup()
