@@ -83,8 +83,6 @@ pollLoop:
 			var (
 				childCtx, _ = r.consumerMgr.getCurrentContext()
 				cl          = r.consumerMgr.getCurrentClient()
-				// TODO
-				isFailover = r.consumerMgr.mode == ModeFailover
 			)
 			r.consumerMgr.Unlock()
 
@@ -188,10 +186,6 @@ pollLoop:
 						return
 					}
 
-					// Mark / commit offsets
-					if !isFailover {
-						r.consumerMgr.commit(childCtx, cl, rec)
-					}
 					r.consumerMgr.SetTopicOffsets(rec)
 				})
 			}

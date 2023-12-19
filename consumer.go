@@ -67,9 +67,16 @@ func (m *consumerManager) getOffsets() map[string]map[int32]kgo.EpochOffset {
 	return m.c.offsets
 }
 
-// SetTopicOffsets accepts a kafka record and updates/sets the topic offset
-// map
+// SetTopicOffsets is responsible for maintaining topic wise offsets in memory.
+// If the mode is `single` it also mark commits the message (auto-commit mode).
+// For failover mode we track all the offsets only in-memory and don't commit messages at all.
+// This is done to reduce overhead caused by CommitOffsets (async) since it cancels any
+// existing commit request, so calling it repeatedly causes cascading cancellations
+// (the sync version blocks, so that is out of question). Since we get no practical benefit
+// from committing records in failover mode (we use the internal offset map for all ops)
+// we don't need to commit records at all.
 func (m *consumerManager) SetTopicOffsets(rec *kgo.Record) {
+	// We only commit records in normal mode.
 	oMap := make(map[int32]kgo.EpochOffset)
 	oMap[rec.Partition] = kgo.EpochOffset{
 		Epoch:  rec.LeaderEpoch,
@@ -77,6 +84,7 @@ func (m *consumerManager) SetTopicOffsets(rec *kgo.Record) {
 	}
 
 	m.Lock()
+	defer m.Unlock()
 	// keep offsets in memory
 	if m.c.offsets != nil {
 		m.c.offsets[rec.Topic] = oMap
@@ -84,7 +92,11 @@ func (m *consumerManager) SetTopicOffsets(rec *kgo.Record) {
 		m.c.offsets = make(map[string]map[int32]kgo.EpochOffset)
 		m.c.offsets[rec.Topic] = oMap
 	}
-	m.Unlock()
+
+	if m.mode == ModeSingle {
+		cl := m.getCurrentClient()
+		cl.MarkCommitRecords(rec)
+	}
 }
 
 // setOffsets set the current offsets into relay struct
@@ -126,12 +138,6 @@ func (m *consumerManager) getCurrentContext() (context.Context, context.CancelFu
 func (m *consumerManager) setCurrentContext(ctx context.Context, cancel context.CancelFunc) {
 	m.c.ctx[m.c.idx] = ctx
 	m.c.cancelFn[m.c.idx] = cancel
-}
-
-// commits marks/sync commit the offsets for autocommit/non-autocommit respectively
-// TODO: comment
-func (m *consumerManager) commit(ctx context.Context, cl *kgo.Client, r *kgo.Record) {
-	cl.MarkCommitRecords(r)
 }
 
 // nodeIncr picks the next consumer group config

@@ -22,6 +22,7 @@ import (
 
 const (
 	ModeFailover = "failover"
+	ModeSingle   = "single"
 
 	StateConnected = iota - 1
 	StateConnecting
