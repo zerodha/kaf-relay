@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"github.com/twmb/franz-go/pkg/kgo"
-	"github.com/twmb/franz-go/pkg/kmsg"
 )
 
 var (
@@ -130,29 +129,8 @@ func (m *consumerManager) setCurrentContext(ctx context.Context, cancel context.
 }
 
 // commits marks/sync commit the offsets for autocommit/non-autocommit respectively
-func (m *consumerManager) commit(ctx context.Context, cl *kgo.Client, r *kgo.Record, manualCommit bool) {
-	// If autocommit is disabled allow committing directly,
-	// or else just mark the message to commit.
-	if manualCommit {
-		oMap := make(map[int32]kgo.EpochOffset)
-		oMap[r.Partition] = kgo.EpochOffset{
-			Epoch:  r.LeaderEpoch,
-			Offset: r.Offset + 1,
-		}
-		tOMap := make(map[string]map[int32]kgo.EpochOffset)
-		tOMap[r.Topic] = oMap
-		cl.CommitOffsets(ctx, tOMap,
-			func(cl *kgo.Client, ocr1 *kmsg.OffsetCommitRequest, ocr2 *kmsg.OffsetCommitResponse, err error) {
-				if err != nil {
-					m.c.logger.Error("error committing offsets", "err", err)
-					return
-				}
-
-			},
-		)
-		return
-	}
-
+// TODO: comment
+func (m *consumerManager) commit(ctx context.Context, cl *kgo.Client, r *kgo.Record) {
 	cl.MarkCommitRecords(r)
 }
 

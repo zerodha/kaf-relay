@@ -81,10 +81,10 @@ pollLoop:
 			// get consumer specific context, client, config
 			r.consumerMgr.Lock()
 			var (
-				childCtx, _  = r.consumerMgr.getCurrentContext()
-				cl           = r.consumerMgr.getCurrentClient()
-				cfg          = r.consumerMgr.getCurrentConfig()
-				manualCommit = cfg.OffsetCommitInterval == 0
+				childCtx, _ = r.consumerMgr.getCurrentContext()
+				cl          = r.consumerMgr.getCurrentClient()
+				// TODO
+				isFailover = r.consumerMgr.mode == ModeFailover
 			)
 			r.consumerMgr.Unlock()
 
@@ -189,7 +189,9 @@ pollLoop:
 					}
 
 					// Mark / commit offsets
-					r.consumerMgr.commit(childCtx, cl, rec, manualCommit)
+					if !isFailover {
+						r.consumerMgr.commit(childCtx, cl, rec)
+					}
 					r.consumerMgr.SetTopicOffsets(rec)
 				})
 			}
