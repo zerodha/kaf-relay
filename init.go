@@ -93,6 +93,8 @@ func (m *consumerManager) initKafkaConsumerGroup() (*kgo.Client, error) {
 		}),
 		kgo.OnPartitionsRevoked(func(ctx context.Context, cl *kgo.Client, m map[string][]int32) {
 			// on close triggers this callback, use this to commit the marked offsets before exiting.
+			// in failover mode this is the only time we commit all the marked records. For single mode
+			// this flushes the marked records that remain (auto-committing routinely commits marked offsets)
 			nCtx, cancel := context.WithTimeout(ctx, cfg.SessionTimeout)
 			defer cancel()
 

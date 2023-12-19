@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"github.com/twmb/franz-go/pkg/kgo"
-	"github.com/twmb/franz-go/pkg/kmsg"
 )
 
 var (
@@ -68,6 +67,34 @@ func (m *consumerManager) getOffsets() map[string]map[int32]kgo.EpochOffset {
 	return m.c.offsets
 }
 
+// SetTopicOffsets is responsible for maintaining topic wise offsets in memory.
+// It updates the topic-offset map for the consumer. This map is the source of truth
+// for syncing offsets across consumers (in failover mode). It also mark commits each record.
+// In the case of `single` mode there will auto-committing that will routinely commit the marked
+// records. For `failover` mode there is no auto-committing and the marked offsets are only committed
+// to kafka once the program is shutdown. The marked offsets are committed in the `OnPartitionsRevoked`
+// consumer callback.
+func (m *consumerManager) SetTopicOffsets(rec *kgo.Record) {
+	// We only commit records in normal mode.
+	oMap := make(map[int32]kgo.EpochOffset)
+	oMap[rec.Partition] = kgo.EpochOffset{
+		Epoch:  rec.LeaderEpoch,
+		Offset: rec.Offset + 1,
+	}
+
+	m.Lock()
+	defer m.Unlock()
+	// keep offsets in memory
+	if m.c.offsets != nil {
+		m.c.offsets[rec.Topic] = oMap
+	} else {
+		m.c.offsets = make(map[string]map[int32]kgo.EpochOffset)
+		m.c.offsets[rec.Topic] = oMap
+	}
+
+	m.getCurrentClient().MarkCommitRecords(rec)
+}
+
 // setOffsets set the current offsets into relay struct
 func (m *consumerManager) setOffsets(o map[string]map[int32]kgo.EpochOffset) {
 	m.c.offsets = o
@@ -107,42 +134,6 @@ func (m *consumerManager) getCurrentContext() (context.Context, context.CancelFu
 func (m *consumerManager) setCurrentContext(ctx context.Context, cancel context.CancelFunc) {
 	m.c.ctx[m.c.idx] = ctx
 	m.c.cancelFn[m.c.idx] = cancel
-}
-
-// commits marks/sync commit the offsets for autocommit/non-autocommit respectively
-func (m *consumerManager) commit(ctx context.Context, cl *kgo.Client, r *kgo.Record, manualCommit bool) {
-	// If autocommit is disabled allow committing directly,
-	// or else just mark the message to commit.
-	if manualCommit {
-		oMap := make(map[int32]kgo.EpochOffset)
-		oMap[r.Partition] = kgo.EpochOffset{
-			Epoch:  r.LeaderEpoch,
-			Offset: r.Offset + 1,
-		}
-		tOMap := make(map[string]map[int32]kgo.EpochOffset)
-		tOMap[r.Topic] = oMap
-		cl.CommitOffsetsSync(ctx, tOMap,
-			func(cl *kgo.Client, ocr1 *kmsg.OffsetCommitRequest, ocr2 *kmsg.OffsetCommitResponse, err error) {
-				if err != nil {
-					m.c.logger.Error("error committing offsets", "err", err)
-					return
-				}
-
-				m.Lock()
-				// keep offsets in memory
-				if m.c.offsets != nil {
-					m.c.offsets[r.Topic] = oMap
-				} else {
-					m.c.offsets = make(map[string]map[int32]kgo.EpochOffset)
-					m.c.offsets[r.Topic] = oMap
-				}
-				m.Unlock()
-			},
-		)
-		return
-	}
-
-	cl.MarkCommitRecords(r)
 }
 
 // nodeIncr picks the next consumer group config
