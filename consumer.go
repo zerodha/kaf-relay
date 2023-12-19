@@ -224,7 +224,7 @@ func (h *consumerHook) OnBrokerDisconnect(meta kgo.BrokerMetadata, conn net.Conn
 				l.Debug("retrying...", "count", h.retries, "max_retries", h.maxRetries)
 			}
 
-			err := h.m.connect()
+			err := h.m.connectToNextNode()
 			if err != nil {
 				l.Error("error creating consumer group", "brokers", cfg.BootstrapBrokers, "err", err)
 				if errors.Is(err, ErrBrokerUnavailable) {
@@ -270,7 +270,7 @@ func initConsumer(ctx context.Context, m *consumerManager, cfgs []ConsumerGroupC
 	)
 	for i := 0; i < len(cfgs); i++ {
 		l.Info("creating consumer group", "broker", cfgs[i].BootstrapBrokers, "group_id", cfgs[i].GroupID)
-		if err = m.connect(); err != nil {
+		if err = m.connectToNextNode(); err != nil {
 			l.Error("error creating consumer", "err", err)
 			if errors.Is(err, ErrBrokerUnavailable) {
 				retries++
@@ -312,7 +312,7 @@ func (m *consumerManager) setActive(idx int) {
 }
 
 // connect selects the the configuration (round-robin fashion) and proceeds to create
-func (m *consumerManager) connect() error {
+func (m *consumerManager) connectToNextNode() error {
 	// select consumer config in round-robin fashion
 	m.c.nodeIncr()
 

@@ -295,7 +295,8 @@ loop:
 					r.logger.Debug("lag threshold exceeded; switching over", "broker", addrs)
 
 					r.consumerMgr.setActive(idx - 1)
-					if err := r.consumerMgr.connect(); err != nil {
+					if err := r.consumerMgr.connectToNextNode(); err != nil {
+						r.consumerMgr.setActive(curr)
 						cleanup()
 						continue lagCheck
 					}
