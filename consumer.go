@@ -68,13 +68,12 @@ func (m *consumerManager) getOffsets() map[string]map[int32]kgo.EpochOffset {
 }
 
 // SetTopicOffsets is responsible for maintaining topic wise offsets in memory.
-// If the mode is `single` it also mark commits the message (auto-commit mode).
-// For failover mode we track all the offsets only in-memory and don't commit messages at all.
-// This is done to reduce overhead caused by CommitOffsets (async) since it cancels any
-// existing commit request, so calling it repeatedly causes cascading cancellations
-// (the sync version blocks, so that is out of question). Since we get no practical benefit
-// from committing records in failover mode (we use the internal offset map for all ops)
-// we don't need to commit records at all.
+// It updates the topic-offset map for the consumer. This map is the source of truth
+// for syncing offsets across consumers (in failover mode). It also mark commits each record.
+// In the case of `single` mode there will auto-committing that will routinely commit the marked
+// records. For `failover` mode there is no auto-committing and the marked offsets are only committed
+// to kafka once the program is shutdown. The marked offsets are committed in the `OnPartitionsRevoked`
+// consumer callback.
 func (m *consumerManager) SetTopicOffsets(rec *kgo.Record) {
 	// We only commit records in normal mode.
 	oMap := make(map[int32]kgo.EpochOffset)
@@ -93,10 +92,7 @@ func (m *consumerManager) SetTopicOffsets(rec *kgo.Record) {
 		m.c.offsets[rec.Topic] = oMap
 	}
 
-	if m.mode == ModeSingle {
-		cl := m.getCurrentClient()
-		cl.MarkCommitRecords(rec)
-	}
+	m.getCurrentClient().MarkCommitRecords(rec)
 }
 
 // setOffsets set the current offsets into relay struct
