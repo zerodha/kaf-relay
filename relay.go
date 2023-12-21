@@ -186,7 +186,7 @@ pollLoop:
 						return
 					}
 
-					r.consumerMgr.SetTopicOffsets(rec)
+					r.consumerMgr.setTopicOffsets(rec)
 				})
 			}
 		}
