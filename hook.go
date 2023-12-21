@@ -87,10 +87,8 @@ func (h *consumerHook) OnBrokerDisconnect(meta kgo.BrokerMetadata, conn net.Conn
 
 		// Add a retry backoff and loop through next nodes and break after few attempts
 	Loop:
-		for h.retries <= h.maxRetries {
-			if h.retries > 0 {
-				l.Info("retrying...", "count", h.retries, "max_retries", h.maxRetries)
-			}
+		for h.retries <= h.maxRetries && h.maxRetries != IndefiniteRetry {
+			l.Info("connecting to node...", "count", h.retries, "max_retries", h.maxRetries)
 
 			err := h.m.connectToNextNode()
 			if err != nil {

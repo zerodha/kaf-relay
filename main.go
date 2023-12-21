@@ -98,7 +98,7 @@ func main() {
 	m := &consumerManager{mode: mode, reconnectInProgress: StateDisconnected}
 
 	// setup consumer
-	if err := initConsumer(ctx, m, cfg.Consumers, logger); err != nil {
+	if err := initConsumer(ctx, m, cfg.Consumers, cfg.App.MaxFailovers, logger); err != nil {
 		log.Fatalf("error starting consumer: %v", err)
 	}
 

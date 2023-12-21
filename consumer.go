@@ -249,7 +249,7 @@ func (m *consumerManager) connectToNextNode() error {
 }
 
 // initConsumer initalizes the consumer when the programs boots up.
-func initConsumer(ctx context.Context, m *consumerManager, cfgs []ConsumerGroupCfg, l *slog.Logger) error {
+func initConsumer(ctx context.Context, m *consumerManager, cfgs []ConsumerGroupCfg, maxRetries int, l *slog.Logger) error {
 	ctx, cancel := context.WithCancel(ctx)
 	c := consumer{
 		cfgs:      cfgs,
@@ -269,14 +269,15 @@ func initConsumer(ctx context.Context, m *consumerManager, cfgs []ConsumerGroupC
 	// try connecting to the consumers one by one
 	// exit if none of the given nodes are available.
 	var (
-		err        error
-		defaultIdx = -1
-		brokersUp  = make(map[string]struct{})
-		retries    = 0
-		backoff    = retryBackoff()
+		err       error
+		brokersUp = make(map[string]struct{})
+		idx       = 0
+		retries   = 0
+		backoff   = retryBackoff()
 	)
-	for i := 0; i < len(cfgs); i++ {
-		l.Info("creating consumer group", "broker", cfgs[i].BootstrapBrokers, "group_id", cfgs[i].GroupID)
+
+	for retries < maxRetries && maxRetries != IndefiniteRetry {
+		l.Info("creating consumer group", "broker", cfgs[idx].BootstrapBrokers, "group_id", cfgs[idx].GroupID)
 		if err = m.connectToNextNode(); err != nil {
 			l.Error("error creating consumer", "err", err)
 			if errors.Is(err, ErrBrokerUnavailable) {
@@ -284,28 +285,23 @@ func initConsumer(ctx context.Context, m *consumerManager, cfgs []ConsumerGroupC
 				waitTries(ctx, backoff(retries))
 			}
 
+			// Round robin select consumer config id
+			idx = (idx + 1) % len(cfgs)
 			continue
 		}
 
 		// mark the consumer group that is up
-		brokersUp[cfgs[i].GroupID] = struct{}{}
-
-		// Note down the consumer group index to make it default
-		if defaultIdx == -1 {
-			defaultIdx = i
-		}
+		brokersUp[cfgs[idx].GroupID] = struct{}{}
 	}
 
-	brokerUp := (defaultIdx != -1)
-
 	// return error if none of the brokers are available
-	if !brokerUp && err != nil {
+	if err != nil {
 		return err
 	}
 
 	// set the default active consumer group
 	// TODO: Close other consumer groups?
-	m.setActive(defaultIdx)
+	m.setActive(idx)
 
 	m.brokersUp = brokersUp
 

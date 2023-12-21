@@ -81,7 +81,7 @@ func (r *relay) Start(ctx context.Context) error {
 pollLoop:
 	for {
 		// exit if max retries is exhausted
-		if r.retries >= r.maxRetries {
+		if r.retries >= r.maxRetries && r.maxRetries != IndefiniteRetry {
 			return fmt.Errorf("`max_retries`(%d) exhausted; exiting relay", r.maxRetries)
 		}
 
@@ -120,24 +120,18 @@ pollLoop:
 			errs := fetches.Errors()
 			for _, err := range errs {
 				if errors.Is(err.Err, kgo.ErrClientClosed) {
-					r.retries++
-					waitTries(ctx, r.retryBackoffFn(r.retries))
-
-					r.logger.Debug("consumer group fetch error client closed", "broker", cl.OptValue(kgo.SeedBrokers))
-					continue pollLoop
+					r.logger.Info("consumer group fetch error client closed", "broker", cl.OptValue(kgo.SeedBrokers))
 				}
 
 				if errors.Is(err.Err, context.Canceled) {
-					r.retries++
-					waitTries(ctx, r.retryBackoffFn(r.retries))
-
-					r.logger.Debug("consumer group fetch error client context cancelled", "broker", cl.OptValue(kgo.SeedBrokers))
-					continue pollLoop
+					r.logger.Info("consumer group fetch error client context cancelled", "broker", cl.OptValue(kgo.SeedBrokers))
 				}
 
 				r.retries++
 				waitTries(ctx, r.retryBackoffFn(r.retries))
 				r.logger.Error("error while consuming", "err", err.Err)
+
+				continue pollLoop
 			}
 
 			// reset max retries if successfull
