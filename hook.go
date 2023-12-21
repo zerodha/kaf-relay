@@ -26,7 +26,7 @@ type consumerHook struct {
 func (h *consumerHook) OnBrokerDisconnect(meta kgo.BrokerMetadata, conn net.Conn) {
 	// Prevent concurrent access of consumer manager when a reconnect is in progress
 	if !atomic.CompareAndSwapUint32(&h.m.reconnectInProgress, StateDisconnected, StateConnecting) {
-		h.m.c.logger.Debug("reconnect in progress; ignore OnBrokerDisconnect callback")
+		h.m.c.logger.Info("reconnect in progress; ignore OnBrokerDisconnect callback")
 		return
 	}
 
@@ -62,13 +62,13 @@ func (h *consumerHook) OnBrokerDisconnect(meta kgo.BrokerMetadata, conn net.Conn
 	addr := net.JoinHostPort(meta.Host, strconv.Itoa(int(meta.Port)))
 	// OnBrokerDisconnect gets triggered 3 times. Ignore the subsequent ones.
 	if !inSlice(addr, cfg.BootstrapBrokers) {
-		l.Debug(fmt.Sprintf("%s is not current active broker (%v); ignore", addr, cfg.BootstrapBrokers))
+		l.Info(fmt.Sprintf("%s is not current active broker (%v); ignore", addr, cfg.BootstrapBrokers))
 		return
 	}
 
 	// Confirm that the broker really went down?
 	down := false
-	l.Debug("another attempt at connecting...")
+	l.Info("another attempt at connecting...")
 	if conn, err := net.DialTimeout("tcp", addr, time.Second); err != nil && checkErr(err) {
 		l.Error("connection failed", "err", err)
 		down = true
@@ -89,7 +89,7 @@ func (h *consumerHook) OnBrokerDisconnect(meta kgo.BrokerMetadata, conn net.Conn
 	Loop:
 		for h.retries <= h.maxRetries {
 			if h.retries > 0 {
-				l.Debug("retrying...", "count", h.retries, "max_retries", h.maxRetries)
+				l.Info("retrying...", "count", h.retries, "max_retries", h.maxRetries)
 			}
 
 			err := h.m.connectToNextNode()

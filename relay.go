@@ -89,7 +89,7 @@ pollLoop:
 			// Stop the poll loop if we reached the end of offsets fetched on boot.
 			if r.stopAtEnd {
 				if hasReachedEnd(r.endOffsets) {
-					r.logger.Debug("reached end of offsets; stopping relay", "broker", cl.OptValue(kgo.SeedBrokers), "offsets", r.endOffsets)
+					r.logger.Info("reached end of offsets; stopping relay", "broker", cl.OptValue(kgo.SeedBrokers), "offsets", r.endOffsets)
 					break pollLoop
 				}
 			}
@@ -292,7 +292,7 @@ loop:
 					setup()
 					// get the current polling context and cancel to break the current poll loop
 					addrs := r.consumerMgr.getClient(idx).OptValue(kgo.SeedBrokers)
-					r.logger.Debug("lag threshold exceeded; switching over", "broker", addrs)
+					r.logger.Info("lag threshold exceeded; switching over", "broker", addrs)
 
 					r.consumerMgr.setActive(idx - 1)
 					if err := r.consumerMgr.connectToNextNode(); err != nil {

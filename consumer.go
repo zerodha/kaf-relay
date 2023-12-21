@@ -175,7 +175,7 @@ func (m *consumerManager) connectToNextNode() error {
 		conn net.Conn
 	)
 
-	l.Debug("attempting to connect to broker", "broker", cfg.BootstrapBrokers, "group_id", cfg.GroupID)
+	l.Info("attempting to connect to broker", "broker", cfg.BootstrapBrokers, "group_id", cfg.GroupID)
 	up := false
 	for _, addr := range cfg.BootstrapBrokers {
 		if conn, err = net.DialTimeout("tcp", addr, time.Second); err != nil && checkErr(err) {
@@ -199,14 +199,14 @@ func (m *consumerManager) connectToNextNode() error {
 	var reinit bool
 	if cl != nil {
 		reinit = true
-		l.Debug("reusing consumer", "broker", cfg.BootstrapBrokers, "group_id", cfg.GroupID)
+		l.Info("reusing consumer", "broker", cfg.BootstrapBrokers, "group_id", cfg.GroupID)
 
 		if err := leaveAndResetOffsets(ctx, cl, cfg, m.c.offsets, l); err != nil {
 			l.Error("error leave and reset offsets", "err", err)
 			return err
 		}
 	} else {
-		l.Debug("creating consumer", "broker", cfg.BootstrapBrokers, "group_id", cfg.GroupID)
+		l.Info("creating consumer", "broker", cfg.BootstrapBrokers, "group_id", cfg.GroupID)
 		cl, err = m.initKafkaConsumerGroup()
 		if err != nil {
 			return err
@@ -227,13 +227,13 @@ func (m *consumerManager) connectToNextNode() error {
 
 	// No offsets in memory; we aren't required to reinit as a clean client is already there.
 	if reinit {
-		l.Debug("reinitializing consumer group", "broker", cfg.BootstrapBrokers, "group_id", cfg.GroupID)
+		l.Info("reinitializing consumer group", "broker", cfg.BootstrapBrokers, "group_id", cfg.GroupID)
 		cl, err = m.initKafkaConsumerGroup()
 		if err != nil {
 			return err
 		}
 
-		l.Debug("resuming consumer fetch topics", "broker", cfg.BootstrapBrokers, "group_id", cfg.GroupID, "topics", cfg.Topics)
+		l.Info("resuming consumer fetch topics", "broker", cfg.BootstrapBrokers, "group_id", cfg.GroupID, "topics", cfg.Topics)
 		cl.ResumeFetchTopics(cfg.Topics...)
 	}
 

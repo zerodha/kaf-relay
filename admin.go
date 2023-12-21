@@ -107,7 +107,7 @@ waitForTopicLag:
 				if o.Offset > eO.Offset {
 					attempts++
 					b := backOff(attempts)
-					l.Debug("topic end offsets was lagging beging; waiting...", "backoff", b.Seconds())
+					l.Info("topic end offsets was lagging beging; waiting...", "backoff", b.Seconds())
 
 					waitTries(ctx, b)
 					continue waitForTopicLag
@@ -125,7 +125,7 @@ waitForTopicLag:
 		}
 	}
 
-	l.Debug("resetting offsets for consumer group",
+	l.Info("resetting offsets for consumer group",
 		"broker", cfg.BootstrapBrokers, "group", cfg.GroupID, "offsets", of)
 	resp, err := admCl.CommitOffsets(ctx, cfg.GroupID, of)
 	if err != nil {
