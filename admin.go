@@ -49,7 +49,7 @@ func getClient(cfg ConsumerGroupCfg) (*kgo.Client, error) {
 }
 
 // leaveAndResetOffsets leaves the current consumer group and resets its offset if given.
-func leaveAndResetOffsets(ctx context.Context, cl *kgo.Client, cfg ConsumerGroupCfg, offsets map[string]map[int32]kgo.EpochOffset, l *slog.Logger) error {
+func leaveAndResetOffsets(ctx context.Context, cl *kgo.Client, cfg ConsumerGroupCfg, offsets map[string]map[int32]kgo.Offset, l *slog.Logger) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
@@ -71,7 +71,7 @@ func leaveAndResetOffsets(ctx context.Context, cl *kgo.Client, cfg ConsumerGroup
 
 // resetOffsets resets the consumer group with the given offsets map.
 // Also waits for topics to catch up to the messages in case it is lagging behind.
-func resetOffsets(ctx context.Context, cl *kgo.Client, cfg ConsumerGroupCfg, offsets map[string]map[int32]kgo.EpochOffset, l *slog.Logger) error {
+func resetOffsets(ctx context.Context, cl *kgo.Client, cfg ConsumerGroupCfg, offsets map[string]map[int32]kgo.Offset, l *slog.Logger) error {
 	var (
 		backOff = retryBackoff()
 		//maxAttempts = 10
@@ -104,7 +104,7 @@ waitForTopicLag:
 					continue
 				}
 
-				if o.Offset > eO.Offset {
+				if o.EpochOffset().Offset > eO.Offset {
 					attempts++
 					b := backOff(attempts)
 					l.Info("topic end offsets was lagging beging; waiting...", "backoff", b.Seconds())
@@ -121,7 +121,9 @@ waitForTopicLag:
 	of := make(kadm.Offsets)
 	for t, po := range offsets {
 		for p, o := range po {
-			of.AddOffset(t, p, o.Offset, o.Epoch)
+			// Since we don't know the leader epoch we send
+			// it as -1
+			of.AddOffset(t, p, o.EpochOffset().Offset, -1)
 		}
 	}
 

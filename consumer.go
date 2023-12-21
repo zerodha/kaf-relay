@@ -31,7 +31,7 @@ type consumer struct {
 	ctx       []context.Context
 	cancelFn  []context.CancelFunc
 
-	offsets map[string]map[int32]kgo.EpochOffset
+	offsets map[string]map[int32]kgo.Offset
 }
 
 // consumerManager is a structure that manages a Kafka consumer instance.
@@ -71,7 +71,7 @@ func (m *consumerManager) incrementIndex() int {
 }
 
 // getOffsets returns the current offsets
-func (m *consumerManager) getOffsets() map[string]map[int32]kgo.EpochOffset {
+func (m *consumerManager) getOffsets() map[string]map[int32]kgo.Offset {
 	return m.c.offsets
 }
 
@@ -84,11 +84,8 @@ func (m *consumerManager) getOffsets() map[string]map[int32]kgo.EpochOffset {
 // consumer callback.
 func (m *consumerManager) setTopicOffsets(rec *kgo.Record) {
 	// We only commit records in normal mode.
-	oMap := make(map[int32]kgo.EpochOffset)
-	oMap[rec.Partition] = kgo.EpochOffset{
-		Epoch:  rec.LeaderEpoch,
-		Offset: rec.Offset + 1,
-	}
+	oMap := make(map[int32]kgo.Offset)
+	oMap[rec.Partition] = kgo.NewOffset().At(rec.Offset + 1)
 
 	m.Lock()
 	defer m.Unlock()
@@ -102,7 +99,7 @@ func (m *consumerManager) setTopicOffsets(rec *kgo.Record) {
 			m.c.offsets[rec.Topic] = oMap
 		}
 	} else {
-		m.c.offsets = make(map[string]map[int32]kgo.EpochOffset)
+		m.c.offsets = make(map[string]map[int32]kgo.Offset)
 		m.c.offsets[rec.Topic] = oMap
 	}
 
@@ -116,7 +113,7 @@ func (m *consumerManager) setTopicOffsets(rec *kgo.Record) {
 }
 
 // setOffsets set the current offsets into relay struct
-func (m *consumerManager) setOffsets(o map[string]map[int32]kgo.EpochOffset) {
+func (m *consumerManager) setOffsets(o map[string]map[int32]kgo.Offset) {
 	m.c.offsets = o
 }
 

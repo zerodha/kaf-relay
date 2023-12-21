@@ -49,6 +49,17 @@ type relay struct {
 
 // Start starts the consumer loop on kafka (A), fetch messages and relays over to kafka (B) using an async producer.
 func (r *relay) Start(ctx context.Context) error {
+	var prodTopics = make([]string, len(r.topics))
+	for k := range r.topics {
+		prodTopics = append(prodTopics, k)
+	}
+
+	prodOffsets, err := getEndOffsets(ctx, r.producer.client, prodTopics)
+	if err != nil {
+		return err
+	}
+
+	r.consumerMgr.setOffsets(prodOffsets.KOffsets())
 	if err := r.validateOffsets(ctx); err != nil {
 		return err
 	}
@@ -334,11 +345,6 @@ func (r *relay) validateOffsets(ctx context.Context) error {
 		return err
 	}
 
-	commitOffsets, err := getCommittedOffsets(ctx, c, consTopics)
-	if err != nil {
-		return err
-	}
-
 	for _, ps := range consOffsets {
 		for _, o := range ps {
 			// store the end offsets
@@ -364,16 +370,9 @@ func (r *relay) validateOffsets(ctx context.Context) error {
 			}
 
 			// Confirm that committed offsets of consumer group matches the offsets of destination kafka topic partition
-			if destOffset.Offset > 0 {
-				o, ok := commitOffsets.Lookup(o.Topic, destOffset.Partition)
-				if !ok {
-					return fmt.Errorf("error finding topic, partition for %v in source kafka", o.Topic)
-				}
-
-				if destOffset.Offset > o.Offset {
-					return fmt.Errorf("destination topic(%v), partition(%v) offsets(%v) is higher than consumer group committed offsets(%v)",
-						destOffset.Topic, destOffset.Partition, destOffset.Offset, o.Offset)
-				}
+			if destOffset.Offset > o.Offset {
+				return fmt.Errorf("destination topic(%v), partition(%v) offsets(%v) is higher than consumer group committed offsets(%v)",
+					destOffset.Topic, destOffset.Partition, destOffset.Offset, o.Offset)
 			}
 		}
 	}
