@@ -8,6 +8,7 @@ import (
 
 type producer struct {
 	client *kgo.Client
+	cfg    ProducerCfg
 
 	logger *slog.Logger
 }
@@ -18,6 +19,8 @@ func initProducer(cfg ProducerCfg, l *slog.Logger) (*producer, error) {
 	prod := &producer{logger: l}
 	opts := []kgo.Opt{
 		kgo.AllowAutoTopicCreation(),
+		kgo.ProduceRequestTimeout(cfg.SessionTimeout),
+		kgo.RecordDeliveryTimeout(cfg.SessionTimeout), // break the :ProduceSync if it takes too long
 		kgo.RequestRetries(cfg.MaxRetries),
 		kgo.ProducerBatchMaxBytes(int32(cfg.MaxMessageBytes)),
 		kgo.MaxBufferedRecords(cfg.BatchSize),
@@ -70,5 +73,6 @@ func initProducer(cfg ProducerCfg, l *slog.Logger) (*producer, error) {
 	}
 
 	prod.client = client
+	prod.cfg = cfg
 	return prod, nil
 }

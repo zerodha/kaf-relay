@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"os"
 
@@ -73,19 +74,19 @@ func leaveAndResetOffsets(ctx context.Context, cl *kgo.Client, cfg ConsumerGroup
 // Also waits for topics to catch up to the messages in case it is lagging behind.
 func resetOffsets(ctx context.Context, cl *kgo.Client, cfg ConsumerGroupCfg, offsets map[string]map[int32]kgo.EpochOffset, l *slog.Logger) error {
 	var (
-		backOff = retryBackoff()
-		//maxAttempts = 10
-		attempts = 0
-		admCl    = kadm.NewClient(cl)
+		backOff     = retryBackoff()
+		maxAttempts = 1 // TODO: make this configurable?
+		attempts    = 0
+		admCl       = kadm.NewClient(cl)
 	)
 	defer admCl.Close()
 
 	// wait for topic lap to catch up
 waitForTopicLag:
 	for {
-		// if attempts >= maxAttempts {
-		// 	return fmt.Errorf("max attempts(%d) for fetching offsets", maxAttempts)
-		// }
+		if attempts >= maxAttempts {
+			return fmt.Errorf("max attempts(%d) for fetching offsets", maxAttempts)
+		}
 
 		l.Debug("fetching end offsets", "topics", cfg.Topics)
 
