@@ -18,6 +18,7 @@ import (
 	"github.com/knadh/koanf/providers/file"
 	"github.com/knadh/koanf/v2"
 	flag "github.com/spf13/pflag"
+	"github.com/twmb/franz-go/pkg/kgo"
 )
 
 var (
@@ -121,11 +122,14 @@ func main() {
 	}
 
 	relay := relay{
-		consumerMgr: m,
-		producer:    p,
-		topics:      cfg.Topics,
-		metrics:     metrics.NewSet(),
-		logger:      logger,
+		consumerMgr:     m,
+		producer:        p,
+		producerBatchCh: make(chan *kgo.Record, cfg.Producer.BatchSize),
+		producerBatch:   make([]*kgo.Record, 0, cfg.Producer.BatchSize),
+
+		topics:  cfg.Topics,
+		metrics: metrics.NewSet(),
+		logger:  logger,
 
 		maxRetries:     cfg.App.MaxFailovers,
 		retryBackoffFn: retryBackoff(),
