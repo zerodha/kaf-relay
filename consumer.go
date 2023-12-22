@@ -87,9 +87,6 @@ func (m *consumerManager) setTopicOffsets(rec *kgo.Record) {
 	oMap := make(map[int32]kgo.Offset)
 	oMap[rec.Partition] = kgo.NewOffset().At(rec.Offset + 1)
 
-	m.Lock()
-	defer m.Unlock()
-
 	// keep offsets in memory
 	if m.c.offsets != nil {
 		if o, ok := m.c.offsets[rec.Topic]; ok {

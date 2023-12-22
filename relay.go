@@ -26,6 +26,9 @@ type relay struct {
 	consumerMgr *consumerManager
 	producer    *producer
 
+	producerBatchCh chan *kgo.Record
+	producerBatch   []*kgo.Record
+
 	topics  map[string]string
 	metrics *metrics.Set
 	logger  *slog.Logger
@@ -49,17 +52,9 @@ type relay struct {
 
 // Start starts the consumer loop on kafka (A), fetch messages and relays over to kafka (B) using an async producer.
 func (r *relay) Start(ctx context.Context) error {
-	var prodTopics = make([]string, len(r.topics))
-	for k := range r.topics {
-		prodTopics = append(prodTopics, k)
-	}
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
 
-	prodOffsets, err := getEndOffsets(ctx, r.producer.client, prodTopics)
-	if err != nil {
-		return err
-	}
-
-	r.consumerMgr.setOffsets(prodOffsets.KOffsets())
 	if err := r.validateOffsets(ctx); err != nil {
 		return err
 	}
@@ -71,6 +66,19 @@ func (r *relay) Start(ctx context.Context) error {
 		go r.trackTopicLag(ctx, wg)
 	}
 
+	// start producer worker
+	wg.Add(1)
+	go func() {
+		if err := r.startProducerWorker(ctx, wg); err != nil {
+			r.logger.Error("error starting producer worker", "err", err)
+		}
+
+		// producer worker exited because there is no active upstream; cancel the context to exit the consumer loop.
+		if ctx.Err() != context.Canceled {
+			cancel()
+		}
+	}()
+
 	// Flush the producer after the poll loop is over.
 	defer func() {
 		if err := r.producer.client.Flush(ctx); err != nil {
@@ -78,6 +86,15 @@ func (r *relay) Start(ctx context.Context) error {
 		}
 	}()
 
+	r.startConsumerWorker(ctx)
+
+	wg.Wait()
+
+	return nil
+}
+
+// startConsumerWorker starts the consumer worker which polls the kafka cluster for messages.
+func (r *relay) startConsumerWorker(ctx context.Context) error {
 pollLoop:
 	for {
 		// exit if max retries is exhausted
@@ -173,31 +190,161 @@ pollLoop:
 					continue
 				}
 
-				msg := &kgo.Record{
+				// queue the message for producing in batch
+				select {
+				case <-ctx.Done():
+					r.logger.Debug("context cancelled; exiting relay")
+					close(r.producerBatchCh)
+					break pollLoop
+				case r.producerBatchCh <- &kgo.Record{
 					Key:       rec.Key,
 					Value:     rec.Value,
 					Topic:     t, // remap destination topic
 					Partition: rec.Partition,
+				}:
+					// default:
+					// 	r.logger.Debug("producer batch channel full")
 				}
-
-				r.metrics.GetOrCreateCounter(fmt.Sprintf(RelayMetric, rec.Topic, t, rec.Partition)).Inc()
-
-				r.logger.Debug("producing message", "broker", r.producer.client.OptValue(kgo.SeedBrokers), "msg", msg)
-
-				// Async producer which internally batches the messages as per producer `batch_size`
-				r.producer.client.Produce(ctx, msg, func(rec *kgo.Record, err error) {
-					if err != nil {
-						r.logger.Error("error producing message", "err", err)
-						return
-					}
-
-					r.consumerMgr.setTopicOffsets(rec)
-				})
 			}
 		}
 	}
 
-	wg.Wait()
+	return nil
+}
+
+// startProducerWorker starts producer worker which flushes the producer batch at a given frequency.
+func (r *relay) startProducerWorker(ctx context.Context, wg *sync.WaitGroup) error {
+	tick := time.NewTicker(r.producer.cfg.FlushFrequency)
+	defer tick.Stop()
+	defer wg.Done()
+
+	for {
+		select {
+		case <-ctx.Done():
+			// reset
+			r.producerBatch = r.producerBatch[:0]
+			return ctx.Err()
+
+		// enqueue the message to the producer batch and flush if batch size is reached.
+		case msg, ok := <-r.producerBatchCh:
+
+			// cleanup; close the producer batch channel and flush the remaining messages
+			if !ok {
+				now := time.Now()
+				ct := 0
+				// ignore other messages; we can fetch the produced offsets from producer topics and start from there on boot.
+				for range r.producerBatchCh {
+					ct++
+				}
+
+				r.logger.Debug("flushing producer batch", "elapsed", time.Since(now), "count", ct)
+				return nil
+			}
+
+			r.producerBatch = append(r.producerBatch, msg)
+
+			if len(r.producerBatch) >= r.producer.cfg.FlushBatchSize {
+				if err := r.flushProducer(ctx); err != nil {
+					return err
+				}
+
+				tick.Reset(r.producer.cfg.FlushFrequency)
+			}
+
+		// flush the producer batch at a given frequency.
+		case <-tick.C:
+			if len(r.producerBatch) > 0 {
+				if err := r.flushProducer(ctx); err != nil {
+					return err
+				}
+			}
+		}
+	}
+}
+
+// flushProducer flushes the producer batch to kafka and updates the topic offsets.
+func (r *relay) flushProducer(ctx context.Context) error {
+	var (
+		retries = 0
+		sent    bool
+		backOff = retryBackoff()
+	)
+
+	saveOffsetsFor := func(recs []*kgo.Record) {
+		// set the topic offset for records that were successfully produced
+		r.consumerMgr.Lock()
+		for i := 0; i < len(recs); i++ {
+			r.consumerMgr.setTopicOffsets(recs[i])
+		}
+		r.consumerMgr.Unlock()
+	}
+
+retry:
+	for retries < r.producer.cfg.MaxRetries {
+		batchLen := len(r.producerBatch)
+
+		r.logger.Info("producing message", "broker", r.producer.client.OptValue(kgo.SeedBrokers), "msgs", batchLen, "retry", retries)
+		results := r.producer.client.ProduceSync(ctx, r.producerBatch...)
+
+		// Check for error and use that to identify what messages failed to produce.
+		var (
+			err       error
+			failures  []*kgo.Record
+			successes []*kgo.Record
+		)
+		for _, res := range results {
+			// exit if context is cancelled
+			if res.Err == context.Canceled {
+				return ctx.Err()
+			}
+
+			if res.Err != nil {
+				failures = append(failures, res.Record)
+				r.logger.Error("error producing message results", "err", res.Err)
+				err = res.Err
+				continue
+			}
+
+			successes = append(successes, res.Record)
+			var (
+				srcTopic  = res.Record.Topic
+				destTopic = r.topics[res.Record.Topic]
+				p         = res.Record.Partition
+			)
+			r.metrics.GetOrCreateCounter(fmt.Sprintf(RelayMetric, srcTopic, destTopic, p)).Inc()
+		}
+
+		// retry if there is an error
+		if err != nil {
+			r.logger.Error("error producing message", "err", err, "failed_count", batchLen, "retry", retries)
+
+			// save offsets for all successfull messages
+			saveOffsetsFor(successes)
+
+			// reset the batch to the failed messages
+			r.producerBatch = failures
+			retries++
+
+			// backoff retry
+			b := backOff(retries)
+			r.logger.Debug("error producing message; waiting for retry...", "backoff", b.Seconds())
+			waitTries(ctx, b)
+
+			continue retry
+		}
+
+		// save offsets for all successfull messages
+		saveOffsetsFor(successes)
+
+		// reset the batch to the remaining messages
+		r.producerBatch = r.producerBatch[batchLen:]
+		sent = true
+		break retry
+	}
+
+	if !sent {
+		return fmt.Errorf("error producing message; exhausted retries (%v)", r.producer.cfg.MaxRetries)
+	}
 
 	return nil
 }
@@ -285,10 +432,12 @@ loop:
 				}
 
 				if currOffsets != nil && thresholdExceeded(of, currOffsets, r.lagThreshold) {
+					// setup method locks consumer manager
 					setup := func() {
 						atomic.CompareAndSwapUint32(&r.consumerMgr.reconnectInProgress, StateDisconnected, StateConnecting)
 						r.consumerMgr.Lock()
 					}
+					// cleanup method unlocks the consumer manager
 					cleanup := func() {
 						r.consumerMgr.Unlock()
 						atomic.CompareAndSwapUint32(&r.consumerMgr.reconnectInProgress, StateConnecting, StateDisconnected)
@@ -299,8 +448,10 @@ loop:
 					addrs := r.consumerMgr.getClient(idx).OptValue(kgo.SeedBrokers)
 					r.logger.Info("lag threshold exceeded; switching over", "broker", addrs)
 
+					// set index to 1 less than the index we are going to increment inside `connectToNextNode`
 					r.consumerMgr.setActive(idx - 1)
 					if err := r.consumerMgr.connectToNextNode(); err != nil {
+						// reset the index back to original on error
 						r.consumerMgr.setActive(curr)
 						cleanup()
 						continue lagCheck
