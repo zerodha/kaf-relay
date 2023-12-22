@@ -52,6 +52,9 @@ type relay struct {
 
 // Start starts the consumer loop on kafka (A), fetch messages and relays over to kafka (B) using an async producer.
 func (r *relay) Start(ctx context.Context) error {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
 	var prodTopics = make([]string, len(r.topics))
 	for k := range r.topics {
 		prodTopics = append(prodTopics, k)
