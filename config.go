@@ -84,7 +84,8 @@ type ProducerCfg struct {
 	// Upper bound of max message bytes to produce
 	MaxMessageBytes int `koanf:"max_message_bytes"`
 	// Buffer produce messages
-	BatchSize int `koanf:"batch_size"`
+	BatchSize      int `koanf:"batch_size"`
+	FlushBatchSize int `koanf:"flush_batch_size"`
 	// compression
 	Compression string `koanf:"compression"` // gzip/snappy/lz4/zstd/none
 
