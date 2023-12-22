@@ -248,16 +248,6 @@ func thresholdExceeded(offsetsX, offsetsY kadm.ListedOffsets, max int64) bool {
 	return false
 }
 
-func getCommittedOffsets(ctx context.Context, client *kgo.Client, topics []string) (kadm.ListedOffsets, error) {
-	adm := kadm.NewClient(client)
-	offsets, err := adm.ListCommittedOffsets(ctx, topics...)
-	if err != nil {
-		return nil, fmt.Errorf("error listing committed offsets of topics(%v): %v", topics, err)
-	}
-
-	return offsets, nil
-}
-
 func getEndOffsets(ctx context.Context, client *kgo.Client, topics []string) (kadm.ListedOffsets, error) {
 	adm := kadm.NewClient(client)
 	offsets, err := adm.ListEndOffsets(ctx, topics...)

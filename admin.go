@@ -74,8 +74,7 @@ func leaveAndResetOffsets(ctx context.Context, cl *kgo.Client, cfg ConsumerGroup
 // Also waits for topics to catch up to the messages in case it is lagging behind.
 func resetOffsets(ctx context.Context, cl *kgo.Client, cfg ConsumerGroupCfg, offsets map[string]map[int32]kgo.Offset, l *slog.Logger) error {
 	var (
-		backOff     = retryBackoff()
-		maxAttempts = 1 // TODO: make this configurable?
+		maxAttempts = -1 // TODO: make this configurable?
 		attempts    = 0
 		admCl       = kadm.NewClient(cl)
 	)
@@ -84,39 +83,37 @@ func resetOffsets(ctx context.Context, cl *kgo.Client, cfg ConsumerGroupCfg, off
 	// wait for topic lap to catch up
 waitForTopicLag:
 	for {
-		if attempts >= maxAttempts {
-			return fmt.Errorf("max attempts(%d) for fetching offsets", maxAttempts)
-		}
+		select {
+		case <-ctx.Done():
+			return nil
+		default:
+			if attempts >= maxAttempts && maxAttempts != IndefiniteRetry {
+				return fmt.Errorf("max attempts(%d) for fetching offsets", maxAttempts)
+			}
 
-		l.Debug("fetching end offsets", "topics", cfg.Topics)
+			// Get end offsets of the topics
+			topicOffsets, err := admCl.ListEndOffsets(ctx, cfg.Topics...)
+			if err != nil {
+				l.Error("error fetching offsets", "err", err)
+				return err
+			}
 
-		// Get end offsets of the topics
-		topicOffsets, err := admCl.ListEndOffsets(ctx, cfg.Topics...)
-		if err != nil {
-			l.Error("error fetching offsets", "err", err)
-			return err
-		}
+			for t, po := range offsets {
+				for p, o := range po {
+					eO, ok := topicOffsets.Lookup(t, p)
+					// TODO:
+					if !ok {
+						continue
+					}
 
-		for t, po := range offsets {
-			for p, o := range po {
-				eO, ok := topicOffsets.Lookup(t, p)
-				// TODO:
-				if !ok {
-					continue
-				}
-
-				if o.EpochOffset().Offset > eO.Offset {
-					attempts++
-					b := backOff(attempts)
-					l.Info("topic end offsets was lagging beging; waiting...", "backoff", b.Seconds())
-
-					waitTries(ctx, b)
-					continue waitForTopicLag
+					if o.EpochOffset().Offset > eO.Offset {
+						return fmt.Errorf("topic end offset is lagging behind by %d msg(s)", o.EpochOffset().Offset-eO.Offset)
+					}
 				}
 			}
-		}
 
-		break waitForTopicLag
+			break waitForTopicLag
+		}
 	}
 
 	of := make(kadm.Offsets)

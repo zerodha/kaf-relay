@@ -1,7 +1,6 @@
 package main
 
 import (
-	"errors"
 	"fmt"
 	"net"
 	"strconv"
@@ -44,12 +43,6 @@ func (h *consumerHook) OnBrokerDisconnect(meta kgo.BrokerMetadata, conn net.Conn
 		l           = h.m.c.logger
 	)
 
-	// failover only allowed for manual commits because autocommit goroutine cannot be stopped otherwise
-	if cfg.OffsetCommitInterval != 0 {
-		l.Debug("failover not allowed for consumer group autocommits")
-		return
-	}
-
 	// ignore if master ctx is closed (keyboard interrupt!)
 	select {
 	case <-h.m.c.parentCtx.Done():
@@ -62,7 +55,7 @@ func (h *consumerHook) OnBrokerDisconnect(meta kgo.BrokerMetadata, conn net.Conn
 	addr := net.JoinHostPort(meta.Host, strconv.Itoa(int(meta.Port)))
 	// OnBrokerDisconnect gets triggered 3 times. Ignore the subsequent ones.
 	if !inSlice(addr, cfg.BootstrapBrokers) {
-		l.Info(fmt.Sprintf("%s is not current active broker (%v); ignore", addr, cfg.BootstrapBrokers))
+		l.Debug(fmt.Sprintf("%s is not current active broker (%v); ignore", addr, cfg.BootstrapBrokers))
 		return
 	}
 
@@ -87,22 +80,31 @@ func (h *consumerHook) OnBrokerDisconnect(meta kgo.BrokerMetadata, conn net.Conn
 
 		// Add a retry backoff and loop through next nodes and break after few attempts
 	Loop:
-		for h.retries <= h.maxRetries && h.maxRetries != IndefiniteRetry {
+		for h.retries <= h.maxRetries || h.maxRetries == IndefiniteRetry {
+			// check for context cancellations
+			select {
+			case <-h.m.c.parentCtx.Done():
+				return
+			default:
+			}
+
 			l.Info("connecting to node...", "count", h.retries, "max_retries", h.maxRetries)
 
 			err := h.m.connectToNextNode()
 			if err != nil {
+				cfg := h.m.getCurrentConfig()
 				l.Error("error creating consumer group", "brokers", cfg.BootstrapBrokers, "err", err)
-				if errors.Is(err, ErrBrokerUnavailable) {
-					h.retries++
-					waitTries(ctx, h.retryBackoffFn(h.retries))
-				}
+				h.retries++
+
+				waitTries(h.m.c.parentCtx, h.retryBackoffFn(h.retries))
+
 				continue Loop
 			}
 
-			break Loop
+			break
 		}
 
+		cfg := h.m.getCurrentConfig()
 		l.Info("failover successful; consumer group is connected now", "brokers", cfg.BootstrapBrokers, "group_id", cfg.GroupID)
 	}
 }

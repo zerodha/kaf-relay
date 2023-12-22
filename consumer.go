@@ -9,11 +9,14 @@ import (
 	"sync"
 	"time"
 
+	"github.com/twmb/franz-go/pkg/kadm"
 	"github.com/twmb/franz-go/pkg/kgo"
 )
 
 var (
 	ErrBrokerUnavailable = errors.New("broker is not available")
+
+	errChosenBrokerDead = "the internal broker struct chosen to issue this request has died--either the broker id is migrating or no longer exists"
 )
 
 // consumer is a structure that holds the state and configuration of a Kafka consumer group.
@@ -44,8 +47,7 @@ type consumerManager struct {
 	reconnectInProgress uint32
 
 	// single/failover
-	mode      string
-	brokersUp map[string]struct{}
+	mode string
 }
 
 // Lock locks the consumer within consumer manager
@@ -119,11 +121,6 @@ func (m *consumerManager) getCurrentConfig() ConsumerGroupCfg {
 	return m.c.cfgs[m.c.idx]
 }
 
-// getClient returns the client for given index.
-func (m *consumerManager) getClient(idx int) *kgo.Client {
-	return m.c.clients[idx]
-}
-
 // getCancelFn returns the current context cancel fn for given client index.
 func (m *consumerManager) getCancelFn(idx int) context.CancelFunc {
 	return m.c.cancelFn[idx]
@@ -182,7 +179,7 @@ func (m *consumerManager) connectToNextNode() error {
 	}
 
 	// Return err if we dont find atleast 1 broker available in the bootstrap broker list
-	if !up && err != nil {
+	if !up {
 		return fmt.Errorf("%w: %w", ErrBrokerUnavailable, err)
 	}
 
@@ -190,32 +187,79 @@ func (m *consumerManager) connectToNextNode() error {
 	ctx, cancel := context.WithCancel(m.c.parentCtx)
 	m.setCurrentContext(ctx, cancel)
 
-	var reinit bool
-	if cl != nil {
-		reinit = true
-		l.Info("reusing consumer", "broker", cfg.BootstrapBrokers, "group_id", cfg.GroupID)
+	// XXX: Offsets can only be reset for `Empty` consumer groups
+	// CASE1: client connection exist
+	//		- leave the group and reset the offsets (if there is any)
+	//		- reinitialize the consumer group; ready!
+	// CASE2: client does not exist
+	//		- create a new consumer group
+	//		- leave the group and reset the offsets (if there is any)
+	//		- reinitialize the consumer group if we had left the group before; ready!
+	var (
+		reinit     bool
+		retries    = 0
+		maxRetries = 3
+	)
+initConsumer:
+	for retries < maxRetries {
+		if cl != nil {
+			cl.ForceMetadataRefresh()
 
-		if err := leaveAndResetOffsets(ctx, cl, cfg, m.c.offsets, l); err != nil {
-			l.Error("error leave and reset offsets", "err", err)
-			return err
-		}
-	} else {
-		l.Info("creating consumer", "broker", cfg.BootstrapBrokers, "group_id", cfg.GroupID)
-		cl, err = m.initKafkaConsumerGroup()
-		if err != nil {
-			return err
-		}
-
-		// Reset consumer group offsets using the existing offsets
-		if m.c.offsets != nil {
 			reinit = true
-			// pause and close the group to mark the group as `Empty` (non-active) as resets are not allowed for `Stable` (active) consumer groups.
-			cl.PauseFetchTopics(cfg.Topics...)
+			l.Info("reusing consumer", "broker", cfg.BootstrapBrokers, "group_id", cfg.GroupID)
 
-			if err := leaveAndResetOffsets(ctx, cl, cfg, m.c.offsets, l); err != nil {
+			err := leaveAndResetOffsets(ctx, cl, cfg, m.c.offsets, l)
+			if err != nil {
+				if err.Error() == errChosenBrokerDead {
+					l.Info("faulty existing client conn; reiniting consumer", "broker", cfg.BootstrapBrokers, "group_id", cfg.GroupID, "retries", retries)
+					cl, err = m.initKafkaConsumerGroup()
+					if err != nil {
+						return err
+					}
+
+					retries++
+					continue initConsumer
+				}
+
 				l.Error("error leave and reset offsets", "err", err)
 				return err
 			}
+
+			// reset offsets went through; break the loop and we can reinitialize the consumer group
+			break initConsumer
+		} else {
+			l.Info("creating consumer", "broker", cfg.BootstrapBrokers, "group_id", cfg.GroupID)
+			cl, err = m.initKafkaConsumerGroup()
+			if err != nil {
+				return err
+			}
+
+			// Reset consumer group offsets using the existing offsets
+			if m.c.offsets != nil {
+				reinit = true
+				// pause and close the group to mark the group as `Empty` (non-active) as resets are not allowed for `Stable` (active) consumer groups.
+				cl.PauseFetchTopics(cfg.Topics...)
+
+				err := leaveAndResetOffsets(ctx, cl, cfg, m.c.offsets, l)
+				if err != nil {
+					if err.Error() == errChosenBrokerDead {
+						l.Info("faulty existing client conn; reiniting consumer", "broker", cfg.BootstrapBrokers, "group_id", cfg.GroupID, "retries", retries)
+						cl, err = m.initKafkaConsumerGroup()
+						if err != nil {
+							return err
+						}
+
+						retries++
+						continue initConsumer
+					}
+
+					l.Error("error leave and reset offsets", "err", err)
+					return err
+				}
+			}
+
+			// reset offsets went through; break the loop and we can reinitialize the consumer group
+			break initConsumer
 		}
 	}
 
@@ -234,9 +278,6 @@ func (m *consumerManager) connectToNextNode() error {
 	// Replace the current client index with new client
 	m.setCurrentClient(cl)
 
-	// reset offsets
-	m.c.offsets = nil
-
 	// test connectivity and ensures the source topics exists
 	if err := testConnection(cl, cfg.SessionTimeout, cfg.Topics); err != nil {
 		return err
@@ -246,15 +287,15 @@ func (m *consumerManager) connectToNextNode() error {
 }
 
 // initConsumer initalizes the consumer when the programs boots up.
-func initConsumer(ctx context.Context, m *consumerManager, cfgs []ConsumerGroupCfg, maxRetries int, l *slog.Logger) error {
+func initConsumer(ctx context.Context, m *consumerManager, cfg Config, o kadm.ListedOffsets, l *slog.Logger) error {
 	ctx, cancel := context.WithCancel(ctx)
 	c := consumer{
-		cfgs:      cfgs,
+		cfgs:      cfg.Consumers,
 		logger:    l,
 		parentCtx: ctx,
-		ctx:       make([]context.Context, len(cfgs)),
-		cancelFn:  make([]context.CancelFunc, len(cfgs)),
-		clients:   make([]*kgo.Client, len(cfgs)),
+		ctx:       make([]context.Context, len(cfg.Consumers)),
+		cancelFn:  make([]context.CancelFunc, len(cfg.Consumers)),
+		clients:   make([]*kgo.Client, len(cfg.Consumers)),
 	}
 
 	c.ctx = append(c.ctx, ctx)
@@ -266,29 +307,42 @@ func initConsumer(ctx context.Context, m *consumerManager, cfgs []ConsumerGroupC
 	// try connecting to the consumers one by one
 	// exit if none of the given nodes are available.
 	var (
-		err       error
-		brokersUp = make(map[string]struct{})
-		idx       = 0
-		retries   = 0
-		backoff   = retryBackoff()
+		err     error
+		idx     = 0
+		retries = 0
+		backoff = retryBackoff()
 	)
 
-	for retries < maxRetries && maxRetries != IndefiniteRetry {
-		l.Info("creating consumer group", "broker", cfgs[idx].BootstrapBrokers, "group_id", cfgs[idx].GroupID)
-		if err = m.connectToNextNode(); err != nil {
-			l.Error("error creating consumer", "err", err)
-			if errors.Is(err, ErrBrokerUnavailable) {
-				retries++
-				waitTries(ctx, backoff(retries))
+	// setup destination offsets before connecting to consumer
+	m.setOffsets(o.KOffsets())
+
+	for retries < cfg.App.MaxFailovers || cfg.App.MaxFailovers == IndefiniteRetry {
+		for i := 0; i < len(cfg.Consumers); i++ {
+			// check for context cancellations
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			default:
 			}
 
-			// Round robin select consumer config id
-			idx = (idx + 1) % len(cfgs)
-			continue
+			l.Info("creating consumer group", "broker", cfg.Consumers[idx].BootstrapBrokers, "group_id", cfg.Consumers[idx].GroupID)
+			if err = m.connectToNextNode(); err != nil {
+				l.Error("error creating consumer", "err", err)
+				retries++
+				waitTries(ctx, backoff(retries))
+
+				// Round robin select consumer config id
+				idx = (idx + 1) % len(cfg.Consumers)
+			} else {
+				break
+			}
 		}
 
-		// mark the consumer group that is up
-		brokersUp[cfgs[idx].GroupID] = struct{}{}
+		// During this ith attempt we were able to connect to
+		// at least 1 consumer part of the list
+		if err == nil {
+			break
+		}
 	}
 
 	// return error if none of the brokers are available
@@ -299,8 +353,6 @@ func initConsumer(ctx context.Context, m *consumerManager, cfgs []ConsumerGroupC
 	// set the default active consumer group
 	// TODO: Close other consumer groups?
 	m.setActive(idx)
-
-	m.brokersUp = brokersUp
 
 	return nil
 }
