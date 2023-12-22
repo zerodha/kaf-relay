@@ -44,12 +44,6 @@ func (h *consumerHook) OnBrokerDisconnect(meta kgo.BrokerMetadata, conn net.Conn
 		l           = h.m.c.logger
 	)
 
-	// failover only allowed for manual commits because autocommit goroutine cannot be stopped otherwise
-	if cfg.OffsetCommitInterval != 0 {
-		l.Debug("failover not allowed for consumer group autocommits")
-		return
-	}
-
 	// ignore if master ctx is closed (keyboard interrupt!)
 	select {
 	case <-h.m.c.parentCtx.Done():
@@ -62,17 +56,19 @@ func (h *consumerHook) OnBrokerDisconnect(meta kgo.BrokerMetadata, conn net.Conn
 	addr := net.JoinHostPort(meta.Host, strconv.Itoa(int(meta.Port)))
 	// OnBrokerDisconnect gets triggered 3 times. Ignore the subsequent ones.
 	if !inSlice(addr, cfg.BootstrapBrokers) {
-		l.Info(fmt.Sprintf("%s is not current active broker (%v); ignore", addr, cfg.BootstrapBrokers))
+		l.Debug(fmt.Sprintf("%s is not current active broker (%v); ignore", addr, cfg.BootstrapBrokers))
 		return
 	}
 
 	// Confirm that the broker really went down?
 	down := false
 	l.Info("another attempt at connecting...")
+	time.Sleep(time.Second * 3)
 	if conn, err := net.DialTimeout("tcp", addr, time.Second); err != nil && checkErr(err) {
 		l.Error("connection failed", "err", err)
 		down = true
 	} else {
+		l.Info("current is up")
 		conn.Close()
 	}
 
@@ -87,20 +83,23 @@ func (h *consumerHook) OnBrokerDisconnect(meta kgo.BrokerMetadata, conn net.Conn
 
 		// Add a retry backoff and loop through next nodes and break after few attempts
 	Loop:
-		for h.retries <= h.maxRetries && h.maxRetries != IndefiniteRetry {
+		for h.retries <= h.maxRetries || h.maxRetries == IndefiniteRetry {
 			l.Info("connecting to node...", "count", h.retries, "max_retries", h.maxRetries)
 
 			err := h.m.connectToNextNode()
 			if err != nil {
 				l.Error("error creating consumer group", "brokers", cfg.BootstrapBrokers, "err", err)
 				if errors.Is(err, ErrBrokerUnavailable) {
+					l.Error("trying to sleep")
 					h.retries++
-					waitTries(ctx, h.retryBackoffFn(h.retries))
+					time.Sleep(2 * time.Second)
+					// TODO: This was causing a fast infinite loop
+					//waitTries(ctx, h.retryBackoffFn(h.retries))
 				}
 				continue Loop
 			}
 
-			break Loop
+			break
 		}
 
 		l.Info("failover successful; consumer group is connected now", "brokers", cfg.BootstrapBrokers, "group_id", cfg.GroupID)

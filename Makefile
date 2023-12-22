@@ -10,7 +10,7 @@ DIST := dist
 .PHONY: dist
 dist:
 	mkdir -p ${DIST}
-	CGO_ENABLED=1 go build -o ${BIN} --ldflags="-s -w -X 'main.buildString=${BUILDSTR}'"
+	CGO_ENABLED=1 go build -o ${BIN} --ldflags="-X 'main.buildString=${BUILDSTR}'"
 	cp ${BIN} ${DIST}
 
 .PHONY: clean

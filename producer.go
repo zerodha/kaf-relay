@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"log/slog"
 
 	"github.com/twmb/franz-go/pkg/kgo"
@@ -13,7 +14,7 @@ type producer struct {
 	logger *slog.Logger
 }
 
-func initProducer(cfg ProducerCfg, l *slog.Logger) (*producer, error) {
+func initProducer(ctx context.Context, cfg ProducerCfg, l *slog.Logger) (*producer, error) {
 	l.Info("creating producer", "broker", cfg.BootstrapBrokers)
 
 	prod := &producer{logger: l}
@@ -56,23 +57,51 @@ func initProducer(cfg ProducerCfg, l *slog.Logger) (*producer, error) {
 		}
 	}
 
-	client, err := kgo.NewClient(opts...)
+	var (
+		retries = 0
+		backoff = retryBackoff()
+		err     error
+	)
+
+outerLoop:
+	for retries < cfg.MaxRetries || cfg.MaxRetries == IndefiniteRetry {
+		select {
+		case <-ctx.Done():
+			break outerLoop
+		default:
+			prod.client, err = kgo.NewClient(opts...)
+			if err != nil {
+				l.Error("error creating producer client", "err", err)
+				retries++
+				waitTries(ctx, backoff(retries))
+				continue
+			}
+
+			// Get the destination topics
+			var topics []string
+			for _, v := range cfg.Topics {
+				topics = append(topics, v)
+			}
+
+			// test connectivity and ensures destination topics exists.
+			err = testConnection(prod.client, cfg.SessionTimeout, topics)
+			if err != nil {
+				l.Error("error connecting to producer", "err", err)
+				retries++
+				waitTries(ctx, backoff(retries))
+				continue
+			}
+
+			if err == nil {
+				prod.cfg = cfg
+				break outerLoop
+			}
+		}
+	}
+
 	if err != nil {
 		return nil, err
 	}
 
-	// Get the destination topics
-	var topics []string
-	for _, v := range cfg.Topics {
-		topics = append(topics, v)
-	}
-
-	// test connectivity and ensures destination topics exists.
-	if err := testConnection(client, cfg.SessionTimeout, topics); err != nil {
-		return nil, err
-	}
-
-	prod.client = client
-	prod.cfg = cfg
 	return prod, nil
 }

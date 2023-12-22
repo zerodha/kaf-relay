@@ -44,8 +44,7 @@ type consumerManager struct {
 	reconnectInProgress uint32
 
 	// single/failover
-	mode      string
-	brokersUp map[string]struct{}
+	mode string
 }
 
 // Lock locks the consumer within consumer manager
@@ -156,6 +155,62 @@ func (m *consumerManager) setActive(idx int) {
 	m.c.nextIndex = idx + 1
 }
 
+// func (m *consumerManager) validateOffsets(ctx context.Context) error {
+// 	var (
+// 		consTopics []string
+// 		prodTopics []string
+// 	)
+// 	for c, p := range r.topics {
+// 		consTopics = append(consTopics, c)
+// 		prodTopics = append(prodTopics, p)
+// 	}
+
+// 	c := m.getCurrentClient()
+// 	consOffsets, err := getEndOffsets(ctx, c, consTopics)
+// 	if err != nil {
+// 		return err
+// 	}
+
+// 	prodOffsets, err := getEndOffsets(ctx, r.producer.client, prodTopics)
+// 	if err != nil {
+// 		return err
+// 	}clients
+
+// 	for _, ps := range consOffsets {
+// 		for _, o := range ps {
+// 			// store the end offsets
+// 			if r.stopAtEnd {
+// 				ct, ok := r.endOffsets[o.Topic]
+// 				if !ok {
+// 					ct = make(map[int32]int64)
+// 				}
+// 				ct[o.Partition] = o.Offset
+// 				r.endOffsets[o.Topic] = ct
+// 			}
+
+// 			// Check if mapping exists
+// 			t, ok := r.topics[o.Topic]
+// 			if !ok {
+// 				return fmt.Errorf("error finding destination topic for %v in given mapping", o.Topic)
+// 			}
+
+// 			// Check if topic, partition exists in destination
+// 			destOffset, ok := prodOffsets.Lookup(t, o.Partition)
+// 			if !ok {
+// 				return fmt.Errorf("error finding destination topic, partition for %v in destination kafka", o.Topic)
+// 			}
+
+// 			// Confirm that committed offsets of consumer group matches the offsets of destination kafka topic partition
+// 			if destOffset.Offset > o.Offset {
+// 				return fmt.Errorf("destination topic(%v), partition(%v) offsets(%v) is higher than consumer group committed offsets(%v)",
+// 					destOffset.Topic, destOffset.Partition, destOffset.Offset, o.Offset)
+// 			}
+// 		}
+// 	}
+
+// 	return nil
+// }
+
 // connect selects the the configuration (round-robin fashion) and proceeds to create
 func (m *consumerManager) connectToNextNode() error {
 	// select consumer config in round-robin fashion
@@ -197,25 +252,19 @@ func (m *consumerManager) connectToNextNode() error {
 
 		if err := leaveAndResetOffsets(ctx, cl, cfg, m.c.offsets, l); err != nil {
 			l.Error("error leave and reset offsets", "err", err)
-			return err
 		}
-	} else {
-		l.Info("creating consumer", "broker", cfg.BootstrapBrokers, "group_id", cfg.GroupID)
-		cl, err = m.initKafkaConsumerGroup()
-		if err != nil {
+	}
+
+	// Reset consumer group offsets using the existing offsets
+	//var reinit bool
+	if m.c.offsets != nil {
+		reinit = true
+		// pause and close the group to mark the group as `Empty` (non-active) as resets are not allowed for `Stable` (active) consumer groups.
+		cl.PauseFetchTopics(cfg.Topics...)
+
+		if err := leaveAndResetOffsets(ctx, cl, cfg, m.c.offsets, l); err != nil {
+			l.Error("error leave and reset offsets", "err", err)
 			return err
-		}
-
-		// Reset consumer group offsets using the existing offsets
-		if m.c.offsets != nil {
-			reinit = true
-			// pause and close the group to mark the group as `Empty` (non-active) as resets are not allowed for `Stable` (active) consumer groups.
-			cl.PauseFetchTopics(cfg.Topics...)
-
-			if err := leaveAndResetOffsets(ctx, cl, cfg, m.c.offsets, l); err != nil {
-				l.Error("error leave and reset offsets", "err", err)
-				return err
-			}
 		}
 	}
 
@@ -266,29 +315,34 @@ func initConsumer(ctx context.Context, m *consumerManager, cfgs []ConsumerGroupC
 	// try connecting to the consumers one by one
 	// exit if none of the given nodes are available.
 	var (
-		err       error
-		brokersUp = make(map[string]struct{})
-		idx       = 0
-		retries   = 0
-		backoff   = retryBackoff()
+		err     error
+		idx     = 0
+		retries = 0
+		backoff = retryBackoff()
 	)
 
-	for retries < maxRetries && maxRetries != IndefiniteRetry {
-		l.Info("creating consumer group", "broker", cfgs[idx].BootstrapBrokers, "group_id", cfgs[idx].GroupID)
-		if err = m.connectToNextNode(); err != nil {
-			l.Error("error creating consumer", "err", err)
-			if errors.Is(err, ErrBrokerUnavailable) {
-				retries++
-				waitTries(ctx, backoff(retries))
-			}
+	for retries < maxRetries || maxRetries == IndefiniteRetry {
+		for i := 0; i < len(cfgs); i++ {
+			l.Info("creating consumer group", "broker", cfgs[idx].BootstrapBrokers, "group_id", cfgs[idx].GroupID)
+			if err = m.connectToNextNode(); err != nil {
+				l.Error("error creating consumer", "err", err)
+				if errors.Is(err, ErrBrokerUnavailable) {
+					retries++
+					waitTries(ctx, backoff(retries))
+				}
 
-			// Round robin select consumer config id
-			idx = (idx + 1) % len(cfgs)
-			continue
+				// Round robin select consumer config id
+				idx = (idx + 1) % len(cfgs)
+			} else {
+				break
+			}
 		}
 
-		// mark the consumer group that is up
-		brokersUp[cfgs[idx].GroupID] = struct{}{}
+		// During this ith attempt we were able to connect to
+		// at least 1 consumer part of the list
+		if err == nil {
+			break
+		}
 	}
 
 	// return error if none of the brokers are available
@@ -300,7 +354,45 @@ func initConsumer(ctx context.Context, m *consumerManager, cfgs []ConsumerGroupC
 	// TODO: Close other consumer groups?
 	m.setActive(idx)
 
-	m.brokersUp = brokersUp
-
 	return nil
 }
+
+// func checkHealthy(ctx context.Context, m *consumerManager, cfgs []ConsumerGroupCfg, maxRetries int, l *slog.Logger) error {
+// 	var (
+// 		err error
+// 		//brokersUp = make(map[string]struct{})
+// 		idx     = 0
+// 		retries = 0
+// 		backoff = retryBackoff()
+// 	)
+
+// 	for retries < maxRetries || maxRetries == IndefiniteRetry {
+// 		l.Info("creating consumer group", "broker", cfgs[idx].BootstrapBrokers, "group_id", cfgs[idx].GroupID)
+// 		if err = m.connectToNextNode(); err != nil {
+// 			l.Error("error creating consumer", "err", err)
+// 			if errors.Is(err, ErrBrokerUnavailable) {
+// 				retries++
+// 				waitTries(ctx, backoff(retries))
+// 			}
+
+// 			// Round robin select consumer config id
+// 			idx = (idx + 1) % len(cfgs)
+// 			continue
+// 		}
+
+// 		// mark the consumer group that is up
+// 		//brokersUp[cfgs[idx].GroupID] = struct{}{}
+// 		break
+// 	}
+
+// 	// return error if none of the brokers are available
+// 	if err != nil {
+// 		return err
+// 	}
+
+// 	// set the default active consumer group
+// 	// TODO: Close other consumer groups?
+// 	m.setActive(idx)
+
+// 	return nil
+// }
