@@ -66,9 +66,10 @@ func (r *relay) Start(ctx context.Context) error {
 	}
 
 	r.consumerMgr.setOffsets(prodOffsets.KOffsets())
-	if err := r.validateOffsets(ctx); err != nil {
-		return err
-	}
+	// TODO: these validations need to occur on connection
+	// if err := r.validateOffsets(ctx); err != nil {
+	// 	return err
+	// }
 
 	wg := &sync.WaitGroup{}
 	// track topic lag and switch over the client if needed.
@@ -291,7 +292,7 @@ func (r *relay) flushProducer(ctx context.Context) error {
 	}
 
 retry:
-	for retries < r.producer.cfg.MaxRetries {
+	for retries < r.producer.cfg.MaxRetries || r.producer.cfg.MaxRetries == IndefiniteRetry {
 		batchLen := len(r.producerBatch)
 
 		r.logger.Info("producing message", "broker", r.producer.client.OptValue(kgo.SeedBrokers), "msgs", batchLen, "retry", retries)
@@ -405,16 +406,23 @@ loop:
 			var (
 				n           = len(cfgs)
 				currOffsets kadm.ListedOffsets
+				cl          *kadm.Client
 			)
 		lagCheck:
 			for i := 0; i < n; i++ {
 				idx := (curr + i) % n // wraparound
-				cl := clients[idx]
+				cl = clients[idx]
 				if cl == nil {
-					continue
+					client, err := getClient(cfgs[idx])
+					if err != nil {
+						r.logger.Error("error creating admin client for tracking lag", "err", err)
+						continue
+					}
+					cl = kadm.NewClient(client)
+					clients[idx] = cl
 				}
-				cfg := cfgs[idx]
 
+				cfg := cfgs[idx]
 				up := false
 				for _, addr := range cfg.BootstrapBrokers {
 					if conn, err := net.DialTimeout("tcp", addr, time.Second); err != nil && checkErr(err) {

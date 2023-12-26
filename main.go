@@ -98,15 +98,15 @@ func main() {
 	// create consumer manager
 	m := &consumerManager{mode: mode, reconnectInProgress: StateDisconnected}
 
+	// setup producer
+	p, err := initProducer(ctx, cfg.Producer, logger)
+	if err != nil {
+		log.Fatalf("error starting producer: %v", err)
+	}
+
 	// setup consumer
 	if err := initConsumer(ctx, m, cfg.Consumers, cfg.App.MaxFailovers, logger); err != nil {
 		log.Fatalf("error starting consumer: %v", err)
-	}
-
-	// setup producer
-	p, err := initProducer(cfg.Producer, logger)
-	if err != nil {
-		log.Fatalf("error starting producer: %v", err)
 	}
 
 	relay := relay{
@@ -164,12 +164,6 @@ func main() {
 	srv.Shutdown(ctx)
 
 	// cleanup
-	for _, cl := range m.c.clients {
-		if cl == nil {
-			continue
-		}
-
-		cl.Close()
-	}
+	m.c.client.Close()
 	p.client.Close()
 }

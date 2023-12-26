@@ -24,6 +24,8 @@ type consumerHook struct {
 // OnBrokerDisconnect is a callback function that handles broker disconnection events in a Kafka consumer group.
 // It checks the disconnection status, verifies the broker's state, and initiates reconnection if necessary.
 func (h *consumerHook) OnBrokerDisconnect(meta kgo.BrokerMetadata, conn net.Conn) {
+	h.m.c.logger.Info("reconnect in progress;")
+
 	// Prevent concurrent access of consumer manager when a reconnect is in progress
 	if !atomic.CompareAndSwapUint32(&h.m.reconnectInProgress, StateDisconnected, StateConnecting) {
 		h.m.c.logger.Info("reconnect in progress; ignore OnBrokerDisconnect callback")
@@ -43,12 +45,6 @@ func (h *consumerHook) OnBrokerDisconnect(meta kgo.BrokerMetadata, conn net.Conn
 		ctx, cancel = h.m.getCurrentContext()
 		l           = h.m.c.logger
 	)
-
-	// failover only allowed for manual commits because autocommit goroutine cannot be stopped otherwise
-	if cfg.OffsetCommitInterval != 0 {
-		l.Debug("failover not allowed for consumer group autocommits")
-		return
-	}
 
 	// ignore if master ctx is closed (keyboard interrupt!)
 	select {
@@ -87,7 +83,7 @@ func (h *consumerHook) OnBrokerDisconnect(meta kgo.BrokerMetadata, conn net.Conn
 
 		// Add a retry backoff and loop through next nodes and break after few attempts
 	Loop:
-		for h.retries <= h.maxRetries && h.maxRetries != IndefiniteRetry {
+		for h.retries <= h.maxRetries || h.maxRetries == IndefiniteRetry {
 			l.Info("connecting to node...", "count", h.retries, "max_retries", h.maxRetries)
 
 			err := h.m.connectToNextNode()

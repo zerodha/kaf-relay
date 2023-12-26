@@ -62,10 +62,9 @@ type ClientCfg struct {
 type ConsumerGroupCfg struct {
 	ClientCfg `koanf:",squash"`
 
-	GroupID              string        `koanf:"group_id"`
-	Offset               string        `koanf:"offset"` // start/end
-	MaxWaitTime          time.Duration `koanf:"max_wait_time"`
-	OffsetCommitInterval time.Duration `koanf:"offset_commit_interval"`
+	GroupID     string        `koanf:"group_id"`
+	Offset      string        `koanf:"offset"` // start/end
+	MaxWaitTime time.Duration `koanf:"max_wait_time"`
 
 	MaxFailovers int `koanf:"max_failovers"`
 	Topics       []string
