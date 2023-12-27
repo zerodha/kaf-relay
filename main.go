@@ -164,6 +164,10 @@ func main() {
 	srv.Shutdown(ctx)
 
 	// cleanup
-	m.c.client.Close()
+	for _, c := range m.c.clients {
+		if c != nil {
+			c.Close()
+		}
+	}
 	p.client.Close()
 }

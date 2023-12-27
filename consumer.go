@@ -19,8 +19,8 @@ var (
 // consumer is a structure that holds the state and configuration of a Kafka consumer group.
 // It manages multiple Kafka clients, handles context cancellation, and tracks offsets for topic partitions.
 type consumer struct {
-	client *kgo.Client
-	cfgs   []ConsumerGroupCfg
+	clients []*kgo.Client
+	cfgs    []ConsumerGroupCfg
 
 	nextIndex int
 	idx       int
@@ -120,7 +120,7 @@ func (m *consumerManager) getCurrentConfig() ConsumerGroupCfg {
 
 // getClient returns the client for given index.
 func (m *consumerManager) getClient(idx int) *kgo.Client {
-	return m.c.client
+	return m.c.clients[idx]
 }
 
 // getCancelFn returns the current context cancel fn for given client index.
@@ -130,12 +130,12 @@ func (m *consumerManager) getCancelFn(idx int) context.CancelFunc {
 
 // getCurrentClient returns current client.
 func (m *consumerManager) getCurrentClient() *kgo.Client {
-	return m.c.client
+	return m.c.clients[m.c.idx]
 }
 
 // setCurrentClient sets client into current index.
 func (m *consumerManager) setCurrentClient(cl *kgo.Client) {
-	m.c.client = cl
+	m.c.clients[m.c.idx] = cl
 }
 
 // getCurrentContext returns the current context, cancellation fns.
@@ -174,7 +174,7 @@ func (m *consumerManager) setActive(idx int) {
 // 	prodOffsets, err := getEndOffsets(ctx, r.producer.client, prodTopics)
 // 	if err != nil {
 // 		return err
-// 	}
+// 	}clients
 
 // 	for _, ps := range consOffsets {
 // 		for _, o := range ps {
@@ -252,25 +252,19 @@ func (m *consumerManager) connectToNextNode() error {
 
 		if err := leaveAndResetOffsets(ctx, cl, cfg, m.c.offsets, l); err != nil {
 			l.Error("error leave and reset offsets", "err", err)
-			return err
 		}
-	} else {
-		l.Info("creating consumer", "broker", cfg.BootstrapBrokers, "group_id", cfg.GroupID)
-		cl, err = m.initKafkaConsumerGroup()
-		if err != nil {
+	}
+
+	// Reset consumer group offsets using the existing offsets
+	//var reinit bool
+	if m.c.offsets != nil {
+		reinit = true
+		// pause and close the group to mark the group as `Empty` (non-active) as resets are not allowed for `Stable` (active) consumer groups.
+		cl.PauseFetchTopics(cfg.Topics...)
+
+		if err := leaveAndResetOffsets(ctx, cl, cfg, m.c.offsets, l); err != nil {
+			l.Error("error leave and reset offsets", "err", err)
 			return err
-		}
-
-		// Reset consumer group offsets using the existing offsets
-		if m.c.offsets != nil {
-			reinit = true
-			// pause and close the group to mark the group as `Empty` (non-active) as resets are not allowed for `Stable` (active) consumer groups.
-			cl.PauseFetchTopics(cfg.Topics...)
-
-			if err := leaveAndResetOffsets(ctx, cl, cfg, m.c.offsets, l); err != nil {
-				l.Error("error leave and reset offsets", "err", err)
-				return err
-			}
 		}
 	}
 
@@ -309,6 +303,7 @@ func initConsumer(ctx context.Context, m *consumerManager, cfgs []ConsumerGroupC
 		parentCtx: ctx,
 		ctx:       make([]context.Context, len(cfgs)),
 		cancelFn:  make([]context.CancelFunc, len(cfgs)),
+		clients:   make([]*kgo.Client, len(cfgs)),
 	}
 
 	c.ctx = append(c.ctx, ctx)
@@ -338,10 +333,9 @@ func initConsumer(ctx context.Context, m *consumerManager, cfgs []ConsumerGroupC
 
 				// Round robin select consumer config id
 				idx = (idx + 1) % len(cfgs)
-				continue
+			} else {
+				break
 			}
-
-			//break
 		}
 
 		// During this ith attempt we were able to connect to

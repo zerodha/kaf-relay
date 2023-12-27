@@ -391,11 +391,11 @@ func (r *relay) trackTopicLag(ctx context.Context, wg *sync.WaitGroup) {
 		clients[i] = kadm.NewClient(cl)
 	}
 
-loop:
 	for {
 		select {
 		case <-ctx.Done():
-			break loop
+			return
+			//break loop
 
 		case <-tick.C:
 			r.logger.Debug("checking topic lag", "freq", r.lagMonitorFreq.Seconds())
@@ -450,7 +450,9 @@ loop:
 					continue lagCheck
 				}
 
+				r.logger.Info("checking threshold", "idx", idx, "curr", curr, "of", of.Offsets(), "curr", currOffsets.Offsets(), "lag", r.lagThreshold)
 				if currOffsets != nil && thresholdExceeded(of, currOffsets, r.lagThreshold) {
+					r.logger.Info("poop")
 					// setup method locks consumer manager
 					setup := func() {
 						atomic.CompareAndSwapUint32(&r.consumerMgr.reconnectInProgress, StateDisconnected, StateConnecting)
@@ -462,14 +464,33 @@ loop:
 						atomic.CompareAndSwapUint32(&r.consumerMgr.reconnectInProgress, StateConnecting, StateDisconnected)
 					}
 
-					setup()
 					// get the current polling context and cancel to break the current poll loop
-					addrs := r.consumerMgr.getClient(idx).OptValue(kgo.SeedBrokers)
+					cl := r.consumerMgr.getClient(idx)
+					if cl == nil {
+						r.logger.Info("creating consumer", "broker", cfg.BootstrapBrokers, "group_id", cfg.GroupID)
+						cl, err = r.consumerMgr.initKafkaConsumerGroup()
+						if err != nil {
+							r.logger.Error("could not connect to node", "err", err)
+							continue lagCheck
+						}
+					}
+
+					setup()
+					r.logger.Info("got current cl", "cl", cl, "idx", idx)
+					addrs := cl.OptValue(kgo.SeedBrokers)
 					r.logger.Info("lag threshold exceeded; switching over", "broker", addrs)
 
 					// set index to 1 less than the index we are going to increment inside `connectToNextNode`
 					r.consumerMgr.setActive(idx - 1)
 					if err := r.consumerMgr.connectToNextNode(); err != nil {
+						r.logger.Error("error creating consumer group", "brokers", cfg.BootstrapBrokers, "err", err)
+						if errors.Is(err, ErrBrokerUnavailable) {
+							r.logger.Error("trying to sleep")
+							//h.retries++
+							time.Sleep(2 * time.Second)
+							// TODO: This was causing a fast infinite loop
+							//waitTries(ctx, h.retryBackoffFn(h.retries))
+						}
 						// reset the index back to original on error
 						r.consumerMgr.setActive(curr)
 						cleanup()

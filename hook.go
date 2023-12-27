@@ -24,8 +24,6 @@ type consumerHook struct {
 // OnBrokerDisconnect is a callback function that handles broker disconnection events in a Kafka consumer group.
 // It checks the disconnection status, verifies the broker's state, and initiates reconnection if necessary.
 func (h *consumerHook) OnBrokerDisconnect(meta kgo.BrokerMetadata, conn net.Conn) {
-	h.m.c.logger.Info("reconnect in progress;")
-
 	// Prevent concurrent access of consumer manager when a reconnect is in progress
 	if !atomic.CompareAndSwapUint32(&h.m.reconnectInProgress, StateDisconnected, StateConnecting) {
 		h.m.c.logger.Info("reconnect in progress; ignore OnBrokerDisconnect callback")
@@ -58,17 +56,19 @@ func (h *consumerHook) OnBrokerDisconnect(meta kgo.BrokerMetadata, conn net.Conn
 	addr := net.JoinHostPort(meta.Host, strconv.Itoa(int(meta.Port)))
 	// OnBrokerDisconnect gets triggered 3 times. Ignore the subsequent ones.
 	if !inSlice(addr, cfg.BootstrapBrokers) {
-		l.Info(fmt.Sprintf("%s is not current active broker (%v); ignore", addr, cfg.BootstrapBrokers))
+		l.Debug(fmt.Sprintf("%s is not current active broker (%v); ignore", addr, cfg.BootstrapBrokers))
 		return
 	}
 
 	// Confirm that the broker really went down?
 	down := false
 	l.Info("another attempt at connecting...")
+	time.Sleep(time.Second * 3)
 	if conn, err := net.DialTimeout("tcp", addr, time.Second); err != nil && checkErr(err) {
 		l.Error("connection failed", "err", err)
 		down = true
 	} else {
+		l.Info("current is up")
 		conn.Close()
 	}
 
@@ -90,13 +90,16 @@ func (h *consumerHook) OnBrokerDisconnect(meta kgo.BrokerMetadata, conn net.Conn
 			if err != nil {
 				l.Error("error creating consumer group", "brokers", cfg.BootstrapBrokers, "err", err)
 				if errors.Is(err, ErrBrokerUnavailable) {
+					l.Error("trying to sleep")
 					h.retries++
-					waitTries(ctx, h.retryBackoffFn(h.retries))
+					time.Sleep(2 * time.Second)
+					// TODO: This was causing a fast infinite loop
+					//waitTries(ctx, h.retryBackoffFn(h.retries))
 				}
 				continue Loop
 			}
 
-			break Loop
+			break
 		}
 
 		l.Info("failover successful; consumer group is connected now", "brokers", cfg.BootstrapBrokers, "group_id", cfg.GroupID)
