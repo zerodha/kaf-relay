@@ -1,7 +1,6 @@
 package main
 
 import (
-	"errors"
 	"fmt"
 	"net"
 	"strconv"
@@ -63,12 +62,10 @@ func (h *consumerHook) OnBrokerDisconnect(meta kgo.BrokerMetadata, conn net.Conn
 	// Confirm that the broker really went down?
 	down := false
 	l.Info("another attempt at connecting...")
-	time.Sleep(time.Second * 3)
 	if conn, err := net.DialTimeout("tcp", addr, time.Second); err != nil && checkErr(err) {
 		l.Error("connection failed", "err", err)
 		down = true
 	} else {
-		l.Info("current is up")
 		conn.Close()
 	}
 
@@ -84,24 +81,30 @@ func (h *consumerHook) OnBrokerDisconnect(meta kgo.BrokerMetadata, conn net.Conn
 		// Add a retry backoff and loop through next nodes and break after few attempts
 	Loop:
 		for h.retries <= h.maxRetries || h.maxRetries == IndefiniteRetry {
+			// check for context cancellations
+			select {
+			case <-h.m.c.parentCtx.Done():
+				return
+			default:
+			}
+
 			l.Info("connecting to node...", "count", h.retries, "max_retries", h.maxRetries)
 
 			err := h.m.connectToNextNode()
 			if err != nil {
+				cfg := h.m.getCurrentConfig()
 				l.Error("error creating consumer group", "brokers", cfg.BootstrapBrokers, "err", err)
-				if errors.Is(err, ErrBrokerUnavailable) {
-					l.Error("trying to sleep")
-					h.retries++
-					time.Sleep(2 * time.Second)
-					// TODO: This was causing a fast infinite loop
-					//waitTries(ctx, h.retryBackoffFn(h.retries))
-				}
+				h.retries++
+
+				waitTries(h.m.c.parentCtx, h.retryBackoffFn(h.retries))
+
 				continue Loop
 			}
 
 			break
 		}
 
+		cfg := h.m.getCurrentConfig()
 		l.Info("failover successful; consumer group is connected now", "brokers", cfg.BootstrapBrokers, "group_id", cfg.GroupID)
 	}
 }

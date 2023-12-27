@@ -5,7 +5,6 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"fmt"
-	"log"
 	"math/rand"
 	"net"
 	"os"
@@ -240,25 +239,13 @@ func thresholdExceeded(offsetsX, offsetsY kadm.ListedOffsets, max int64) bool {
 			// check if the difference is breaching threshold
 			if y.Offset < x.Offset {
 				if (x.Offset - y.Offset) >= max {
-					log.Print("max breached")
 					return true
 				}
 			}
 		}
 	}
 
-	log.Print("max not breached")
 	return false
-}
-
-func getCommittedOffsets(ctx context.Context, client *kgo.Client, topics []string) (kadm.ListedOffsets, error) {
-	adm := kadm.NewClient(client)
-	offsets, err := adm.ListCommittedOffsets(ctx, topics...)
-	if err != nil {
-		return nil, fmt.Errorf("error listing committed offsets of topics(%v): %v", topics, err)
-	}
-
-	return offsets, nil
 }
 
 func getEndOffsets(ctx context.Context, client *kgo.Client, topics []string) (kadm.ListedOffsets, error) {

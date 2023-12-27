@@ -60,6 +60,7 @@ func initFilterProviders(names []string, ko *koanf.Koanf, log *slog.Logger) (map
 	return out, nil
 }
 
+// initKafkaConsumerGroup initializes a Kafka consumer group.
 func (m *consumerManager) initKafkaConsumerGroup() (*kgo.Client, error) {
 	var (
 		cfg      = m.getCurrentConfig()
