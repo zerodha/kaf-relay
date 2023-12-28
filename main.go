@@ -17,7 +17,6 @@ import (
 	"github.com/knadh/koanf/providers/file"
 	"github.com/knadh/koanf/v2"
 	flag "github.com/spf13/pflag"
-	"github.com/twmb/franz-go/pkg/kgo"
 )
 
 var (
@@ -33,14 +32,13 @@ func main() {
 	}
 
 	var (
-		configPath            string
-		mode                  string
-		checkpoint, stopAtEnd bool
-		filterPaths           []string
+		configPath  string
+		mode        string
+		stopAtEnd   bool
+		filterPaths []string
 	)
 	f.StringVar(&configPath, "config", "config.toml", "Path to the TOML configuration file")
 	f.StringVar(&mode, "mode", "single", "single/failover")
-	f.BoolVar(&checkpoint, "checkpoint", false, "Use checkpoint file or not")
 	f.BoolVar(&stopAtEnd, "stop-at-end", false, "Stop relay at the end of offsets")
 	f.StringSliceVar(&filterPaths, "filter", []string{}, "Path to filter providers. Can specify multiple values.")
 	f.Bool("version", false, "Current version of the build")
@@ -53,6 +51,10 @@ func main() {
 	if ok, _ := f.GetBool("version"); ok {
 		fmt.Println(buildString)
 		os.Exit(0)
+	}
+
+	if stopAtEnd && mode == ModeFailover {
+		log.Fatalf("`--stop-at-end` cannot be used with `failover` mode")
 	}
 
 	// Load the config file.
@@ -95,41 +97,50 @@ func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
+	var (
+		metr = metrics.NewSet()
+	)
+
 	// setup producer
-	p, err := initProducer(ctx, cfg.Producer, logger)
+	prod, err := initProducer(ctx, cfg.Producer, metr, logger)
 	if err != nil {
 		log.Fatalf("error starting producer: %v", err)
 	}
 
-	var destTopics []string
-	for _, p := range cfg.Producer.Topics {
-		destTopics = append(destTopics, p)
-	}
-
-	destOffsets, err := getEndOffsets(ctx, p.client, destTopics)
+	// setup offsets manager with the destination offsets
+	destOffsets, err := prod.GetEndOffsets(ctx, cfg.App.MaxRequestDuration)
 	if err != nil {
 		log.Fatalf("error fetching destination offsets: %v", err)
 	}
+	offsetMgr := &offsetManager{Offsets: destOffsets.KOffsets()}
 
-	// create consumer manager
-	m := &consumerManager{
-		mode:                mode,
-		reconnectInProgress: StateDisconnected,
+	// setup consumer hook, consumer
+	hookCh := make(chan struct{}, 1)
+	var n = make([]Node, len(cfg.Consumers))
+	for i := 0; i < len(cfg.Consumers); i++ {
+		n[i] = Node{
+			Weight: -1,
+			ID:     i,
+		}
 	}
 
-	// setup consumer
-	if err := initConsumer(ctx, m, cfg, destOffsets, logger); err != nil {
-		log.Fatalf("error starting consumer: %v", err)
+	cons := &consumer{
+		client:      nil, // init during track healthy
+		cfgs:        cfg.Consumers,
+		offsetMgr:   offsetMgr,
+		nodeTracker: NewNodeTracker(n),
+		l:           logger,
 	}
 
+	// setup relay
 	relay := relay{
-		consumerMgr:     m,
-		producer:        p,
-		producerBatchCh: make(chan *kgo.Record, cfg.Producer.BatchSize),
-		producerBatch:   make([]*kgo.Record, 0, cfg.Producer.BatchSize),
+		consumer: cons,
+		producer: prod,
+
+		unhealthyCh: hookCh,
 
 		topics:  cfg.Topics,
-		metrics: metrics.NewSet(),
+		metrics: metr,
 		logger:  logger,
 
 		maxRetries:     cfg.App.MaxFailovers,
@@ -137,10 +148,15 @@ func main() {
 
 		lagMonitorFreq: cfg.App.LagMonitorFreq,
 		lagThreshold:   cfg.App.LagThreshold,
+		maxReqTime:     cfg.App.MaxRequestDuration,
 
-		stopAtEnd:  stopAtEnd,
-		srcOffsets: make(map[string]map[int32]int64),
-		filters:    filters,
+		stopAtEnd:   stopAtEnd,
+		srcOffsets:  make(map[string]map[int32]int64),
+		destOffsets: destOffsets.KOffsets(),
+
+		filters: filters,
+
+		nodeCh: make(chan int, 1),
 	}
 
 	// Start metrics handler
@@ -176,11 +192,8 @@ func main() {
 	// shutdown server
 	srv.Shutdown(ctx)
 
-	// cleanup
-	for _, c := range m.c.clients {
-		if c != nil {
-			c.Close()
-		}
-	}
-	p.client.Close()
+	// close underlying client connections
+	relay.Close()
+
+	logger.Info("done!")
 }

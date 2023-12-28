@@ -5,11 +5,10 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"fmt"
+	"log/slog"
 	"math/rand"
-	"net"
 	"os"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/twmb/franz-go/pkg/kadm"
@@ -18,6 +17,12 @@ import (
 	"github.com/twmb/franz-go/pkg/kmsg"
 	"github.com/twmb/franz-go/pkg/sasl/plain"
 	"github.com/twmb/franz-go/pkg/sasl/scram"
+)
+
+var (
+	RelayMetric = "kafka_relay_msg_count{source=\"%s\", destination=\"%s\", partition=\"%d\"}"
+
+	ErrLaggingBehind = fmt.Errorf("topic end offset is lagging behind")
 )
 
 const (
@@ -153,47 +158,114 @@ func appendSASL(opts []kgo.Opt, cfg ClientCfg) []kgo.Opt {
 	return opts
 }
 
-func inSlice(x string, l []string) bool {
-	for _, i := range l {
-		if i == x {
-			return true
+// leaveAndResetOffsets leaves the current consumer group and resets its offset if given.
+func leaveAndResetOffsets(ctx context.Context, cl *kgo.Client, cfg ConsumerGroupCfg, offsets map[string]map[int32]kgo.Offset, l *slog.Logger) error {
+	// leave group; mark the group as `Empty` before attempting to reset offsets.
+	l.Debug("leaving group", "group_id", cfg.GroupID)
+	err := cl.LeaveGroupContext(ctx)
+	if err != nil {
+		return err
+	}
+
+	// Reset consumer group offsets using the existing offsets
+	if offsets != nil {
+		l.Debug("resetting offsets", "offsets", offsets)
+		if err := resetOffsets(ctx, cl, cfg, offsets, l); err != nil {
+			return err
 		}
 	}
 
-	return false
+	return nil
 }
 
-func checkErr(err error) bool {
-	if netError, ok := err.(net.Error); ok && netError.Timeout() {
-		return true
+// resetOffsets resets the consumer group with the given offsets map.
+// Also waits for topics to catch up to the messages in case it is lagging behind.
+func resetOffsets(ctx context.Context, cl *kgo.Client, cfg ConsumerGroupCfg, offsets map[string]map[int32]kgo.Offset, l *slog.Logger) error {
+	var (
+		maxAttempts = -1 // TODO: make this configurable?
+		attempts    = 0
+		admCl       = kadm.NewClient(cl)
+	)
+
+	// wait for topic lap to catch up
+waitForTopicLag:
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		default:
+			if attempts >= maxAttempts && maxAttempts != IndefiniteRetry {
+				return fmt.Errorf("max attempts(%d) for fetching offsets", maxAttempts)
+			}
+
+			// Get end offsets of the topics
+			topicOffsets, err := admCl.ListEndOffsets(ctx, cfg.Topics...)
+			if err != nil {
+				l.Error("error fetching offsets", "err", err)
+				return err
+			}
+
+			for t, po := range offsets {
+				for p, o := range po {
+					eO, ok := topicOffsets.Lookup(t, p)
+					// TODO:
+					if !ok {
+						continue
+					}
+
+					if o.EpochOffset().Offset > eO.Offset {
+						return fmt.Errorf("%w by %d msgs(s)", ErrLaggingBehind, o.EpochOffset().Offset-eO.Offset)
+					}
+				}
+			}
+
+			break waitForTopicLag
+		}
 	}
 
-	switch t := err.(type) {
-	case *net.OpError:
-		if t.Op == "dial" {
-			return true
-		} else if t.Op == "read" {
-			return true
+	// force set consumer group offsets
+	commitOffsets := make(map[string]map[int32]kgo.EpochOffset)
+	of := make(kadm.Offsets)
+	for t, po := range offsets {
+		oMap := make(map[int32]kgo.EpochOffset)
+		for p, o := range po {
+			oMap[p] = o.EpochOffset()
+			of.AddOffset(t, p, o.EpochOffset().Offset, -1)
 		}
+		commitOffsets[t] = oMap
+	}
+	cl.SetOffsets(commitOffsets)
 
-	case syscall.Errno:
-		if t == syscall.ECONNREFUSED {
-			return true
-		}
+	l.Info("resetting offsets for consumer group",
+		"broker", cfg.BootstrapBrokers, "group", cfg.GroupID, "offsets", of)
+	resp, err := admCl.CommitOffsets(ctx, cfg.GroupID, of)
+	if err != nil {
+		l.Error("error resetting group offset", "err", err)
 	}
 
-	return false
+	_ = resp
+	// // check for errors in offset responses
+	// for _, or := range resp {
+	// 	for _, r := range or {
+	// 		if r.Err != nil {
+	// 			l.Error("error resetting group offset", "err", r.Err)
+	// 			return err
+	// 		}
+	// 	}
+	// }
+
+	return nil
 }
 
 // retryBackoff is basic backoff fn from franz-go
-// ref: https://github.com/twmb/franz-go/blob/01651affd204d4a3577a341e748c5d09b52587f8/pkg/kgo/config.go#L450
+// ref: https://github.com/twmb/franz-go/blob/01651affd204d4a3577a341e748c5d09b52587f8/pkg/kgo/go#L450
 func retryBackoff() func(int) time.Duration {
 	var rngMu sync.Mutex
 	rng := rand.New(rand.NewSource(time.Now().UnixNano()))
 	return func(fails int) time.Duration {
 		const (
-			min = 500 * time.Millisecond
-			max = 10 * time.Second / 2
+			min = 1 * time.Second
+			max = 20 * time.Second / 2
 		)
 		if fails <= 0 {
 			return min
@@ -228,6 +300,7 @@ func waitTries(ctx context.Context, b time.Duration) {
 	}
 }
 
+// thresholdExceeded checks if the difference between the offsets is breaching the threshold
 func thresholdExceeded(offsetsX, offsetsY kadm.ListedOffsets, max int64) bool {
 	for t, po := range offsetsX {
 		for p, x := range po {
@@ -248,7 +321,11 @@ func thresholdExceeded(offsetsX, offsetsY kadm.ListedOffsets, max int64) bool {
 	return false
 }
 
-func getEndOffsets(ctx context.Context, client *kgo.Client, topics []string) (kadm.ListedOffsets, error) {
+// getEndOffsets returns the end offsets of the given topics
+func getEndOffsets(ctx context.Context, client *kgo.Client, topics []string, timeout time.Duration) (kadm.ListedOffsets, error) {
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
 	adm := kadm.NewClient(client)
 	offsets, err := adm.ListEndOffsets(ctx, topics...)
 	if err != nil {
@@ -269,4 +346,67 @@ func hasReachedEnd(offsets map[string]map[int32]int64) bool {
 	}
 
 	return true
+}
+
+// Node represents a node with its weight
+type Node struct {
+	Down   bool
+	ID     int
+	Weight int
+}
+
+// NodeTracker keeps track of the healthiest node
+type NodeTracker struct {
+	sync.Mutex
+
+	nodes      []Node
+	healthiest Node
+}
+
+// NewNodeTracker creates a new HealthiestNodeTracker
+func NewNodeTracker(nodes []Node) *NodeTracker {
+	return &NodeTracker{
+		nodes:      nodes,
+		healthiest: Node{Down: true, Weight: -1},
+	}
+}
+
+// GetHealthy returns the healthiest node without blocking
+func (h *NodeTracker) GetHealthy() Node {
+	h.Lock()
+	node := h.healthiest
+	h.Unlock()
+
+	return node
+}
+
+func (h *NodeTracker) PushUp(nodeID int, weight int) {
+	h.updateWeight(nodeID, weight, false)
+}
+
+func (h *NodeTracker) PushDown(nodeID int) {
+	h.updateWeight(nodeID, -1, true)
+}
+
+// updateWeight updates the weight for a particular node
+func (h *NodeTracker) updateWeight(nodeID int, weight int, down bool) {
+	h.Lock()
+	defer h.Unlock()
+
+	var (
+		minWeight = -1
+	)
+	for i := 0; i < len(h.nodes); i++ {
+		node := h.nodes[i]
+		if node.ID == nodeID {
+			node.Down = down
+			node.Weight = weight
+		}
+		h.nodes[i] = node
+
+		if node.Weight > minWeight && !node.Down {
+			minWeight = node.Weight
+			h.healthiest = node
+		}
+	}
 }

@@ -2,13 +2,10 @@ package main
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"io"
 	"log/slog"
-	"net"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/VictoriaMetrics/metrics"
@@ -17,17 +14,12 @@ import (
 	"github.com/twmb/franz-go/pkg/kgo"
 )
 
-var (
-	RelayMetric = "kafka_relay_msg_count{source=\"%s\", destination=\"%s\", partition=\"%d\"}"
-)
-
 // relay represents the input, output kafka and the remapping necessary to forward messages from one topic to another.
 type relay struct {
-	consumerMgr *consumerManager
-	producer    *producer
+	consumer *consumer
+	producer *producer
 
-	producerBatchCh chan *kgo.Record
-	producerBatch   []*kgo.Record
+	unhealthyCh chan struct{}
 
 	topics  map[string]string
 	metrics *metrics.Set
@@ -38,19 +30,33 @@ type relay struct {
 	maxRetries     int
 	retries        int
 
-	// Save the end offset of topic; decrement and make it easy to stop at 0
-	srcOffsets map[string]map[int32]int64
-	stopAtEnd  bool
-
 	// monitor lags
 	lagThreshold   int64
 	lagMonitorFreq time.Duration
 
+	// max time spent checking node health
+	maxReqTime time.Duration
+
+	// Save the end offset of topic; decrement and make it easy to stop at 0
+	destOffsets map[string]map[int32]kgo.Offset
+	srcOffsets  map[string]map[int32]int64
+	stopAtEnd   bool
+
 	// list of filter implementations for skipping messages
 	filters map[string]filter.Provider
+
+	// signal to cancel the poll loop context
+	// use this to track the current node id in track topic lag
+	nodeCh     chan int
+	pollCancel func()
 }
 
-// Start starts the consumer loop on kafka (A), fetch messages and relays over to kafka (B) using an async producer.
+// getMetrics writes the internal prom metrics to the given io.Writer
+func (r *relay) getMetrics(buf io.Writer) {
+	r.metrics.WritePrometheus(buf)
+}
+
+// Start starts the consumer loop on kafka (A), fetch messages and relays over to kafka (B) using an async
 func (r *relay) Start(ctx context.Context) error {
 	// wait for all goroutines to exit
 	wg := &sync.WaitGroup{}
@@ -61,54 +67,58 @@ func (r *relay) Start(ctx context.Context) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	// Flush the producer after the poll loop is over.
-	defer func() {
-		if err := r.producer.client.Flush(ctx); err != nil {
-			r.logger.Error("error while flushing the producer", "err", err)
-		}
-	}()
-
-	// validate and set offsets under consumer manager
-	if err := r.manageOffsets(ctx); err != nil {
-		r.logger.Error("error managing offsets", "err", err)
-		return err
-	}
-
 	// track topic lag and switch over the client if needed.
-	if r.lagThreshold > 0 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			if err := r.trackTopicLag(ctx); err != nil {
-				r.logger.Error("error tracking topic lag", "err", err)
-			}
-		}()
-	}
-
-	// start producer worker
+	r.logger.Info("tracking healthy nodes")
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		if err := r.startProducerWorker(ctx); err != nil {
+		if err := r.trackHealthy(ctx); err != nil {
+			r.logger.Error("error tracking healthy nodes", "err", err)
+		}
+	}()
+
+	// start producer worker
+	wg.Add(1)
+	r.logger.Info("starting producer worker")
+	go func() {
+		defer wg.Done()
+		if err := r.producer.StartWorker(ctx); err != nil {
 			r.logger.Error("error starting producer worker", "err", err)
 		}
 
 		// producer worker exited because there is no active upstream; cancel the context to exit the consumer loop.
 		if ctx.Err() != context.Canceled {
+			r.logger.Error("error managing offsets")
 			cancel()
 		}
 	}()
 
 	// Start consumer group
+	r.logger.Info("starting consumer worker")
+	// Trigger consumer to fetch initial healthy node
+	r.unhealthyCh <- struct{}{}
 	if err := r.startConsumerWorker(ctx); err != nil {
 		r.logger.Error("error starting consumer worker", "err", err)
 	}
 
+	// close the producer batch channel to drain producer worker on exit
+	r.producer.CloseBatchCh()
+
 	return nil
+}
+
+// Close close the underlying kgo.Client(s)
+func (r *relay) Close() {
+	r.consumer.Close()
+	r.producer.Close()
 }
 
 // startConsumerWorker starts the consumer worker which polls the kafka cluster for messages.
 func (r *relay) startConsumerWorker(ctx context.Context) error {
+	pollCtx, pollCancelFn := context.WithCancel(context.Background())
+	r.pollCancel = pollCancelFn
+
+	var nodeID = -1
 pollLoop:
 	for {
 		// exit if max retries is exhausted
@@ -118,52 +128,86 @@ pollLoop:
 
 		select {
 		case <-ctx.Done():
-			close(r.producerBatchCh)
 			return ctx.Err()
-		default:
-			// get consumer specific context, client, config
-			r.consumerMgr.Lock()
+
+		case <-r.unhealthyCh:
+			r.logger.Debug("poll loop received unhealthy signal")
+			pollCancelFn()
+
 			var (
-				childCtx, _ = r.consumerMgr.getCurrentContext()
-				cl          = r.consumerMgr.getCurrentClient()
+				succ = false
+				err  error
 			)
-			r.consumerMgr.Unlock()
+			for !succ {
+				select {
+				case <-ctx.Done():
+					return ctx.Err()
+				default:
+				}
+
+				r.logger.Debug("poll loop requesting healthy node")
+				nodeID, err = r.consumer.GetHealthy(ctx)
+				if err != nil {
+					r.logger.Error("poll loop could not get healthy node", "err", err)
+					r.retries++
+					waitTries(ctx, r.retryBackoffFn(r.retries))
+					continue
+				}
+
+				r.logger.Debug("poll loop got healthy node", "id", nodeID)
+				err = r.consumer.Connect(ctx, r.consumer.cfgs[nodeID])
+				if err != nil {
+					r.logger.Error("poll loop could not re-init consumer", "err", err)
+					r.retries++
+					waitTries(ctx, r.retryBackoffFn(r.retries))
+					continue
+				}
+				succ = true
+			}
+
+			pollCtx, pollCancelFn = context.WithCancel(ctx)
+			r.pollCancel = pollCancelFn
+			defer pollCancelFn()
+
+			r.logger.Debug("poll loop sending current node", "id", nodeID)
+			r.nodeCh <- nodeID
+
+		default:
+			cl := r.consumer.client
 
 			// Stop the poll loop if we reached the end of offsets fetched on boot.
 			if r.stopAtEnd {
 				if hasReachedEnd(r.srcOffsets) {
 					r.logger.Info("reached end of offsets; stopping relay", "broker", cl.OptValue(kgo.SeedBrokers), "offsets", r.srcOffsets)
-					close(r.producerBatchCh)
-					break pollLoop
+					return nil
 				}
 			}
 
 			r.logger.Debug("polling active consumer", "broker", cl.OptValue(kgo.SeedBrokers))
-			fetches := cl.PollFetches(childCtx)
+			fetches := cl.PollFetches(pollCtx)
 
 			if fetches.IsClientClosed() {
 				r.retries++
-				waitTries(ctx, r.retryBackoffFn(r.retries))
+				r.logger.Error("client closed; sending unhealthy signal")
+				r.unhealthyCh <- struct{}{}
 
-				r.logger.Debug("consumer group fetch client closed")
+				r.logger.Debug("updating weight", "node", nodeID, "weight", -1)
+				r.consumer.nodeTracker.PushDown(nodeID)
+
 				continue pollLoop
 			}
 
 			// Proxy fetch errors into error callback function
 			errs := fetches.Errors()
 			for _, err := range errs {
-				if errors.Is(err.Err, kgo.ErrClientClosed) {
-					r.logger.Info("consumer group fetch error client closed", "broker", cl.OptValue(kgo.SeedBrokers))
-				}
-
-				if errors.Is(err.Err, context.Canceled) {
-					r.logger.Info("consumer group fetch error client context cancelled", "broker", cl.OptValue(kgo.SeedBrokers))
-				}
-
 				r.retries++
 				waitTries(ctx, r.retryBackoffFn(r.retries))
-				r.logger.Error("error while consuming", "err", err.Err)
+				r.logger.Error("fetch errors; sending unhealthy signal", "err", err.Err)
 
+				r.unhealthyCh <- struct{}{}
+
+				r.logger.Debug("updating weight", "node", nodeID, "weight", -1)
+				r.consumer.nodeTracker.PushDown(nodeID)
 				continue pollLoop
 			}
 
@@ -174,6 +218,19 @@ pollLoop:
 			iter := fetches.RecordIter()
 			for !iter.Done() {
 				rec := iter.Next()
+				oMap := make(map[int32]kgo.Offset)
+				oMap[rec.Partition] = kgo.NewOffset().At(rec.Offset + 1)
+				if r.consumer.offsetMgr.Offsets != nil {
+					if o, ok := r.consumer.offsetMgr.Offsets[rec.Topic]; ok {
+						o[rec.Partition] = oMap[rec.Partition]
+						r.consumer.offsetMgr.Offsets[rec.Topic] = o
+					} else {
+						r.consumer.offsetMgr.Offsets[rec.Topic] = oMap
+					}
+				} else {
+					r.consumer.offsetMgr.Offsets = make(map[string]map[int32]kgo.Offset)
+					r.consumer.offsetMgr.Offsets[rec.Topic] = oMap
+				}
 
 				if err := r.processMessage(ctx, rec); err != nil {
 					r.logger.Error("error processing message", "err", err)
@@ -182,8 +239,6 @@ pollLoop:
 			}
 		}
 	}
-
-	return nil
 }
 
 // processMessage processes the given message and forwards it to the producer batch channel.
@@ -224,15 +279,15 @@ func (r *relay) processMessage(ctx context.Context, rec *kgo.Record) error {
 	// queue the message for producing in batch
 	select {
 	case <-ctx.Done():
-		r.logger.Debug("context cancelled; exiting relay")
-		close(r.producerBatchCh)
 		return ctx.Err()
-	case r.producerBatchCh <- &kgo.Record{
+
+	case r.producer.GetBatchCh() <- &kgo.Record{
 		Key:       rec.Key,
 		Value:     rec.Value,
 		Topic:     t, // remap destination topic
 		Partition: rec.Partition,
 	}:
+
 		// default:
 		// 	r.logger.Debug("producer batch channel full")
 	}
@@ -240,174 +295,18 @@ func (r *relay) processMessage(ctx context.Context, rec *kgo.Record) error {
 	return nil
 }
 
-// startProducerWorker starts producer worker which flushes the producer batch at a given frequency.
-func (r *relay) startProducerWorker(ctx context.Context) error {
-	tick := time.NewTicker(r.producer.cfg.FlushFrequency)
-	defer tick.Stop()
-
-	for {
-		select {
-		case <-ctx.Done():
-			// drain the batch
-			for rec := range r.producerBatchCh {
-				r.producerBatch = append(r.producerBatch, rec)
-			}
-
-			// flush producer on exit
-			if len(r.producerBatch) > 0 {
-				ctx, cancel := context.WithTimeout(context.Background(), r.producer.cfg.SessionTimeout)
-				defer cancel()
-
-				if err := r.flushProducer(ctx); err != nil {
-					return err
-				}
-			}
-
-			// reset
-			r.producerBatch = r.producerBatch[:0]
-			return ctx.Err()
-
-		// enqueue the message to the producer batch and flush if batch size is reached.
-		case msg, ok := <-r.producerBatchCh:
-
-			// cleanup; close the producer batch channel and flush the remaining messages
-			if !ok {
-				now := time.Now()
-				ct := 0
-				// ignore other messages; we can fetch the produced offsets from producer topics and start from there on boot.
-				for range r.producerBatchCh {
-					ct++
-				}
-
-				r.logger.Debug("flushing producer batch", "elapsed", time.Since(now), "count", ct)
-				return nil
-			}
-
-			r.producerBatch = append(r.producerBatch, msg)
-
-			if len(r.producerBatch) >= r.producer.cfg.FlushBatchSize {
-				if err := r.flushProducer(ctx); err != nil {
-					return err
-				}
-
-				tick.Reset(r.producer.cfg.FlushFrequency)
-			}
-
-		// flush the producer batch at a given frequency.
-		case <-tick.C:
-			if len(r.producerBatch) > 0 {
-				if err := r.flushProducer(ctx); err != nil {
-					return err
-				}
-			}
-		}
-	}
-}
-
-// flushProducer flushes the producer batch to kafka and updates the topic offsets.
-func (r *relay) flushProducer(ctx context.Context) error {
-	var (
-		retries = 0
-		sent    bool
-		backOff = retryBackoff()
-	)
-
-	saveOffsetsFor := func(recs []*kgo.Record) {
-		// set the topic offset for records that were successfully produced
-		r.consumerMgr.Lock()
-		for i := 0; i < len(recs); i++ {
-			r.consumerMgr.setTopicOffsets(recs[i])
-		}
-		r.consumerMgr.Unlock()
-	}
-
-retry:
-	for retries < r.producer.cfg.MaxRetries || r.producer.cfg.MaxRetries == IndefiniteRetry {
-		batchLen := len(r.producerBatch)
-
-		r.logger.Info("producing message", "broker", r.producer.client.OptValue(kgo.SeedBrokers), "msgs", batchLen, "retry", retries)
-		results := r.producer.client.ProduceSync(ctx, r.producerBatch...)
-
-		// Check for error and use that to identify what messages failed to produce.
-		var (
-			err       error
-			failures  []*kgo.Record
-			successes []*kgo.Record
-		)
-		for _, res := range results {
-			// exit if context is cancelled
-			if res.Err == context.Canceled {
-				return ctx.Err()
-			}
-
-			if res.Err != nil {
-				failures = append(failures, res.Record)
-				r.logger.Error("error producing message results", "err", res.Err)
-				err = res.Err
-				continue
-			}
-
-			successes = append(successes, res.Record)
-			var (
-				srcTopic  = res.Record.Topic
-				destTopic = r.topics[res.Record.Topic]
-				p         = res.Record.Partition
-			)
-			r.metrics.GetOrCreateCounter(fmt.Sprintf(RelayMetric, srcTopic, destTopic, p)).Inc()
-		}
-
-		// retry if there is an error
-		if err != nil {
-			r.logger.Error("error producing message", "err", err, "failed_count", batchLen, "retry", retries)
-
-			// save offsets for all successfull messages
-			saveOffsetsFor(successes)
-
-			// reset the batch to the failed messages
-			r.producerBatch = failures
-			retries++
-
-			// backoff retry
-			b := backOff(retries)
-			r.logger.Debug("error producing message; waiting for retry...", "backoff", b.Seconds())
-			waitTries(ctx, b)
-
-			continue retry
-		}
-
-		// save offsets for all successfull messages
-		saveOffsetsFor(successes)
-
-		// reset the batch to the remaining messages
-		r.producerBatch = r.producerBatch[batchLen:]
-		sent = true
-		break retry
-	}
-
-	if !sent {
-		return fmt.Errorf("error producing message; exhausted retries (%v)", r.producer.cfg.MaxRetries)
-	}
-
-	return nil
-}
-
-// getMetrics writes the internal prom metrics to the given io.Writer
-func (r *relay) getMetrics(buf io.Writer) {
-	r.metrics.WritePrometheus(buf)
-}
-
-// trackTopicLag tracks the topic lag between servers and switches over if threshold breached.
-func (r *relay) trackTopicLag(ctx context.Context) error {
+// trackHealthy tracks the healthy node in the cluster and checks if the lag threshold is exceeded.
+// * Push a healthy node to the channel if threshold is not exceeded; always drain the existing and repush if full
+// * Push a signal to exit the poll loop if threshold exceeded
+func (r *relay) trackHealthy(ctx context.Context) error {
 	tick := time.NewTicker(r.lagMonitorFreq)
 	defer tick.Stop()
 
 	// XXX: Create separate clients for tracking offsets to prevent locking
 	// main consumer manager.
 	// create a copy of the consumer configs
-	r.consumerMgr.Lock()
-	cfgs := make([]ConsumerGroupCfg, len(r.consumerMgr.c.cfgs))
-	copy(cfgs, r.consumerMgr.c.cfgs)
-	r.consumerMgr.Unlock()
+	cfgs := make([]ConsumerGroupCfg, len(r.consumer.cfgs))
+	copy(cfgs, r.consumer.cfgs)
 
 	// create admin clients for these configs
 	clients := make([]*kgo.Client, len(cfgs))
@@ -420,35 +319,47 @@ func (r *relay) trackTopicLag(ctx context.Context) error {
 		clients[i] = cl
 	}
 
+	var (
+		curr        = 0
+		isFirstNode = true
+	)
 	for {
 		select {
 		case <-ctx.Done():
+			r.logger.Debug("closing node tracker go-routine")
+			// close all admin clients
+			for _, cl := range clients {
+				if cl != nil {
+					cl.Close()
+				}
+			}
+
 			return ctx.Err()
+
+		case nodeID := <-r.nodeCh:
+			r.logger.Info("tracker received current node from poll loop", "id", nodeID)
+			curr = nodeID
 
 		case <-tick.C:
 			r.logger.Debug("checking topic lag", "freq", r.lagMonitorFreq.Seconds())
-
-			r.consumerMgr.Lock()
-			curr := r.consumerMgr.Index()
-			r.consumerMgr.Unlock()
 			var (
-				n  = len(cfgs)
-				cl *kgo.Client
+				n           = len(cfgs)
+				cl          *kgo.Client
+				currOffsets kadm.ListedOffsets
+				err         error
 			)
+
 			// check in the next iteration
-			currOffsets, err := kadm.NewClient(clients[curr]).ListEndOffsets(ctx, cfgs[curr].Topics...)
+			currOffsets, err = getEndOffsets(ctx, clients[curr], cfgs[curr].Topics, r.maxReqTime)
 			if err != nil && currOffsets == nil {
-				r.logger.Error("error fetching end offset for current client", "err", err)
-				continue
+				r.logger.Debug("error fetching end offset for current client", "err", err, "node", curr)
+				r.consumer.nodeTracker.PushDown(curr)
 			}
 
-		lagCheck:
 			for i := 0; i < n; i++ {
-				var (
-					idx = (curr + i) % n // wraparound
-					cfg = cfgs[idx]
-				)
-				cl = clients[idx]
+				r.logger.Debug("tracker checking node", "id", i, "curr", curr)
+				cfg := cfgs[i]
+				cl = clients[i]
 
 				// create a new client if it doesn't exist
 				if cl == nil {
@@ -456,149 +367,66 @@ func (r *relay) trackTopicLag(ctx context.Context) error {
 					cl, err = getClient(cfg)
 					if err != nil {
 						r.logger.Error("error creating admin client for tracking lag", "err", err)
+						r.consumer.nodeTracker.PushDown(i)
 						continue
 					}
 
-					clients[idx] = cl
-				} else {
-					// confirm if the node is up or not?
-					up := false
-					for _, addr := range cfg.BootstrapBrokers {
-						if conn, err := net.DialTimeout("tcp", addr, time.Second); err != nil && checkErr(err) {
-							up = false
-						} else {
-							conn.Close()
-							up = true
-							break
-						}
-					}
-
-					// skip pulling end offsets if the nodes are not up
-					if !up {
-						continue
-					}
+					clients[i] = cl
 				}
 
 				// get end offsets using admin api
-				of, err := kadm.NewClient(cl).ListEndOffsets(ctx, cfg.Topics...)
+				of, err := getEndOffsets(ctx, cl, cfg.Topics, r.maxReqTime)
 				if err != nil {
-					r.logger.Error("error fetching end offsets; tracking topic lag", "err", err)
-					continue lagCheck
+					r.logger.Debug("error fetching end offsets; tracking topic lag", "err", err)
+					r.consumer.nodeTracker.PushDown(i)
+					continue
+				}
+
+				var weight int
+				for _, v := range of {
+					for _, o := range v {
+						weight += int(o.Offset)
+					}
+				}
+
+				r.logger.Debug("updating weight", "node", i, "weight", weight)
+				r.consumer.nodeTracker.PushUp(i, weight)
+
+				// set end offsets
+				if isFirstNode && r.stopAtEnd {
+					r.logger.Debug("setting up consumer offsets to exit automatically on consuming everything")
+					// set end offsets of consumer during bootup to exit on consuming everything.
+					for _, ps := range of {
+						for _, o := range ps {
+							ct, ok := r.srcOffsets[o.Topic]
+							if !ok {
+								ct = make(map[int32]int64)
+							}
+							ct[o.Partition] = o.Offset
+							r.srcOffsets[o.Topic] = ct
+						}
+					}
+
+					isFirstNode = false
 				}
 
 				// skip lag check for current node
-				if idx == curr {
-					continue lagCheck
+				if r.lagThreshold == 0 || currOffsets == nil || i == curr {
+					continue
 				}
 
 				// check if threshold is exceeded or not
-				if !thresholdExceeded(of, currOffsets, r.lagThreshold) {
-					continue lagCheck
+				if thresholdExceeded(of, currOffsets, r.lagThreshold) {
+					//select {
+					// send the healthy node to the channel;
+					//case r.unhealthyCh <- struct{}{}:
+					r.logger.Error("sending unhealthy: threshold exceeded")
+					r.pollCancel()
+					curr = <-r.nodeCh
+
+					continue
 				}
-
-				// setup method locks consumer manager
-				setup := func() {
-					atomic.CompareAndSwapUint32(&r.consumerMgr.reconnectInProgress, StateDisconnected, StateConnecting)
-					r.consumerMgr.Lock()
-				}
-				// cleanup method unlocks the consumer manager
-				cleanup := func() {
-					r.consumerMgr.Unlock()
-					atomic.CompareAndSwapUint32(&r.consumerMgr.reconnectInProgress, StateConnecting, StateDisconnected)
-				}
-
-				setup()
-				// get the current polling context and cancel to break the current poll loop
-				addrs := cl.OptValue(kgo.SeedBrokers)
-				r.logger.Info("lag threshold exceeded; switching over", "broker", addrs)
-
-				// set index to 1 less than the index we are going to increment inside `connectToNextNode`
-				r.consumerMgr.setActive(idx - 1)
-				if err := r.consumerMgr.connectToNextNode(); err != nil {
-					r.logger.Error("error connecting to next topic during topic-lag failover", "broker", cfgs[r.consumerMgr.c.idx].BootstrapBrokers, "err", err)
-					r.consumerMgr.setActive(curr)
-					cleanup()
-					continue lagCheck
-				}
-
-				cancelFn := r.consumerMgr.getCancelFn(curr)
-				cancelFn()
-
-				cleanup()
-				break lagCheck
 			}
 		}
 	}
-}
-
-// manageOffsets fetches the end offsets of src, dest topics
-// If stop-at-end flag is specified, this tracks it.
-// Uses the dest topic offsets to resume the consumer from there.
-// Also, validates for dest offsets <= src offsets.
-func (r *relay) manageOffsets(ctx context.Context) error {
-	var (
-		srcTopics []string
-
-		c = r.consumerMgr.getCurrentClient()
-	)
-	for c := range r.topics {
-		srcTopics = append(srcTopics, c)
-	}
-
-	srcOffsets, err := getEndOffsets(ctx, c, srcTopics)
-	if err != nil {
-		return err
-	}
-
-	// set end offsets of consumer during bootup to exit on consuming everything.
-	if r.stopAtEnd {
-		for _, ps := range srcOffsets {
-			for _, o := range ps {
-				ct, ok := r.srcOffsets[o.Topic]
-				if !ok {
-					ct = make(map[int32]int64)
-				}
-				ct[o.Partition] = o.Offset
-				r.srcOffsets[o.Topic] = ct
-			}
-		}
-	}
-
-	// validate if the dest offsets are <= source offsets
-	if err := r.validateOffsets(ctx, srcOffsets.KOffsets(), r.consumerMgr.getOffsets()); err != nil {
-		return err
-	}
-
-	return nil
-}
-
-// validateOffsets makes sure that source, destination has same topic, partitions.
-func (r *relay) validateOffsets(ctx context.Context, srcOffsets, destOffsets map[string]map[int32]kgo.Offset) error {
-	for topic, ps := range srcOffsets {
-		for p, o := range ps {
-			// Check if mapping exists
-			destTopic, ok := r.topics[topic]
-			if !ok {
-				return fmt.Errorf("error finding destination topic for %v in given mapping", topic)
-			}
-
-			destPartition, ok := destOffsets[destTopic]
-			if !ok {
-				return fmt.Errorf("error finding destination topic, partition for %v in destination kafka", topic)
-			}
-
-			dOffsets, ok := destPartition[p]
-			if !ok {
-				return fmt.Errorf("error finding destination topic, partition for %v in destination kafka", topic)
-			}
-
-			// Confirm that committed offsets of consumer group matches the offsets of destination kafka topic partition
-			if dOffsets.EpochOffset().Offset > o.EpochOffset().Offset {
-				return fmt.Errorf("destination topic(%v), partition(%v) offsets(%v) is higher than consumer group committed offsets(%v)",
-					destTopic, p, dOffsets.EpochOffset().Offset, o.EpochOffset().Offset)
-			}
-		}
-	}
-
-	return nil
 }

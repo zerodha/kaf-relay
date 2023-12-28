@@ -22,7 +22,8 @@ type Config struct {
 
 // AppCfg is other miscellaneous app configs.
 type AppCfg struct {
-	MaxFailovers int `koanf:"max_failovers"`
+	MaxFailovers       int           `koanf:"max_failovers"`
+	MaxRequestDuration time.Duration `koanf:"max_request_duration"`
 
 	LogLevel          slog.Level `koanf:"log_level"`
 	MetricsServerAddr string     `koanf:"metrics_server_addr"`
@@ -63,7 +64,6 @@ type ConsumerGroupCfg struct {
 	ClientCfg `koanf:",squash"`
 
 	GroupID     string        `koanf:"group_id"`
-	Offset      string        `koanf:"offset"` // start/end
 	MaxWaitTime time.Duration `koanf:"max_wait_time"`
 
 	MaxFailovers int `koanf:"max_failovers"`

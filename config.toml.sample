@@ -6,7 +6,9 @@ metrics_server_addr = ":7081"
 # In failover mode, if we breach the lag threshold in serverA compared to serverB we switch over to serverB immediately
 lag_threshold = 100
 # Frequency at which we need to poll for lags
-lag_monitor_frequency = "10s"
+lag_monitor_frequency = "500ms"
+# Max request wait time to check if a node is down
+max_request_duration = "100ms"
 
 [[consumers]]
 name = "node1"
