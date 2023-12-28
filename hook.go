@@ -54,57 +54,45 @@ func (h *consumerHook) OnBrokerDisconnect(meta kgo.BrokerMetadata, conn net.Conn
 
 	addr := net.JoinHostPort(meta.Host, strconv.Itoa(int(meta.Port)))
 	// OnBrokerDisconnect gets triggered 3 times. Ignore the subsequent ones.
-	if !inSlice(addr, cfg.BootstrapBrokers) {
+	if !inSlice(addr, cfg.BootstrapBrokers) || cl == nil {
 		l.Debug(fmt.Sprintf("%s is not current active broker (%v); ignore", addr, cfg.BootstrapBrokers))
 		return
 	}
 
-	// Confirm that the broker really went down?
-	down := false
-	l.Info("another attempt at connecting...")
-	if conn, err := net.DialTimeout("tcp", addr, time.Second); err != nil && checkErr(err) {
-		l.Error("connection failed", "err", err)
-		down = true
-	} else {
-		conn.Close()
-	}
-
 	// reconnect with next node
-	if down {
-		l.Debug("cleaning up resources for old client")
-		// pause current client; drops the internally buffered recs
-		cl.PauseFetchTopics(cfg.Topics...)
+	l.Debug("cleaning up resources for old client")
+	// pause current client; drops the internally buffered recs
+	cl.PauseFetchTopics(cfg.Topics...)
 
-		// exit the poll fetch loop for this consumer group
-		cancel()
+	// exit the poll fetch loop for this consumer group
+	cancel()
 
-		// Add a retry backoff and loop through next nodes and break after few attempts
-	Loop:
-		for h.retries <= h.maxRetries || h.maxRetries == IndefiniteRetry {
-			// check for context cancellations
-			select {
-			case <-h.m.c.parentCtx.Done():
-				return
-			default:
-			}
-
-			l.Info("connecting to node...", "count", h.retries, "max_retries", h.maxRetries)
-
-			err := h.m.connectToNextNode()
-			if err != nil {
-				cfg := h.m.getCurrentConfig()
-				l.Error("error creating consumer group", "brokers", cfg.BootstrapBrokers, "err", err)
-				h.retries++
-
-				waitTries(h.m.c.parentCtx, h.retryBackoffFn(h.retries))
-
-				continue Loop
-			}
-
-			break
+	// Add a retry backoff and loop through next nodes and break after few attempts
+Loop:
+	for h.retries <= h.maxRetries || h.maxRetries == IndefiniteRetry {
+		// check for context cancellations
+		select {
+		case <-h.m.c.parentCtx.Done():
+			return
+		default:
 		}
 
-		cfg := h.m.getCurrentConfig()
-		l.Info("failover successful; consumer group is connected now", "brokers", cfg.BootstrapBrokers, "group_id", cfg.GroupID)
+		l.Info("connecting to node...", "count", h.retries, "max_retries", h.maxRetries)
+
+		err := h.m.connectToNextNode()
+		if err != nil {
+			cfg := h.m.getCurrentConfig()
+			l.Error("error creating consumer group", "brokers", cfg.BootstrapBrokers, "err", err)
+			h.retries++
+
+			waitTries(h.m.c.parentCtx, h.retryBackoffFn(h.retries))
+
+			continue Loop
+		}
+
+		break
 	}
+
+	cfg = h.m.getCurrentConfig()
+	l.Info("failover successful; consumer group is connected now", "brokers", cfg.BootstrapBrokers, "group_id", cfg.GroupID)
 }
