@@ -50,7 +50,7 @@ func getClient(cfg ConsumerGroupCfg) (*kgo.Client, error) {
 }
 
 // leaveAndResetOffsets leaves the current consumer group and resets its offset if given.
-func leaveAndResetOffsets(ctx context.Context, cl *kgo.Client, cfg ConsumerGroupCfg, offsets map[string]map[int32]kgo.EpochOffset, l *slog.Logger) error {
+func leaveAndResetOffsets(ctx context.Context, cl *kgo.Client, cfg ConsumerGroupCfg, offsets map[string]map[int32]kgo.Offset, l *slog.Logger) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
@@ -72,10 +72,9 @@ func leaveAndResetOffsets(ctx context.Context, cl *kgo.Client, cfg ConsumerGroup
 
 // resetOffsets resets the consumer group with the given offsets map.
 // Also waits for topics to catch up to the messages in case it is lagging behind.
-func resetOffsets(ctx context.Context, cl *kgo.Client, cfg ConsumerGroupCfg, offsets map[string]map[int32]kgo.EpochOffset, l *slog.Logger) error {
+func resetOffsets(ctx context.Context, cl *kgo.Client, cfg ConsumerGroupCfg, offsets map[string]map[int32]kgo.Offset, l *slog.Logger) error {
 	var (
-		backOff     = retryBackoff()
-		maxAttempts = 1 // TODO: make this configurable?
+		maxAttempts = -1 // TODO: make this configurable?
 		attempts    = 0
 		admCl       = kadm.NewClient(cl)
 	)
@@ -84,49 +83,49 @@ func resetOffsets(ctx context.Context, cl *kgo.Client, cfg ConsumerGroupCfg, off
 	// wait for topic lap to catch up
 waitForTopicLag:
 	for {
-		if attempts >= maxAttempts {
-			return fmt.Errorf("max attempts(%d) for fetching offsets", maxAttempts)
-		}
+		select {
+		case <-ctx.Done():
+			return nil
+		default:
+			if attempts >= maxAttempts && maxAttempts != IndefiniteRetry {
+				return fmt.Errorf("max attempts(%d) for fetching offsets", maxAttempts)
+			}
 
-		l.Debug("fetching end offsets", "topics", cfg.Topics)
+			// Get end offsets of the topics
+			topicOffsets, err := admCl.ListEndOffsets(ctx, cfg.Topics...)
+			if err != nil {
+				l.Error("error fetching offsets", "err", err)
+				return err
+			}
 
-		// Get end offsets of the topics
-		topicOffsets, err := admCl.ListEndOffsets(ctx, cfg.Topics...)
-		if err != nil {
-			l.Error("error fetching offsets", "err", err)
-			return err
-		}
+			for t, po := range offsets {
+				for p, o := range po {
+					eO, ok := topicOffsets.Lookup(t, p)
+					// TODO:
+					if !ok {
+						continue
+					}
 
-		for t, po := range offsets {
-			for p, o := range po {
-				eO, ok := topicOffsets.Lookup(t, p)
-				// TODO:
-				if !ok {
-					continue
-				}
-
-				if o.Offset > eO.Offset {
-					attempts++
-					b := backOff(attempts)
-					l.Debug("topic end offsets was lagging beging; waiting...", "backoff", b.Seconds())
-
-					waitTries(ctx, b)
-					continue waitForTopicLag
+					if o.EpochOffset().Offset > eO.Offset {
+						return fmt.Errorf("topic end offset is lagging behind by %d msg(s)", o.EpochOffset().Offset-eO.Offset)
+					}
 				}
 			}
-		}
 
-		break waitForTopicLag
+			break waitForTopicLag
+		}
 	}
 
 	of := make(kadm.Offsets)
 	for t, po := range offsets {
 		for p, o := range po {
-			of.AddOffset(t, p, o.Offset, o.Epoch)
+			// Since we don't know the leader epoch we send
+			// it as -1
+			of.AddOffset(t, p, o.EpochOffset().Offset, -1)
 		}
 	}
 
-	l.Debug("resetting offsets for consumer group",
+	l.Info("resetting offsets for consumer group",
 		"broker", cfg.BootstrapBrokers, "group", cfg.GroupID, "offsets", of)
 	resp, err := admCl.CommitOffsets(ctx, cfg.GroupID, of)
 	if err != nil {

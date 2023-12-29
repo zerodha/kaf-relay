@@ -21,10 +21,13 @@ import (
 )
 
 const (
-	ModeFailover = "failover"
-	ModeSingle   = "single"
+	ModeFailover    = "failover"
+	ModeSingle      = "single"
+	IndefiniteRetry = -1
+)
 
-	StateDisconnected = iota - 1
+const (
+	StateDisconnected = iota
 	StateConnecting
 )
 
@@ -243,16 +246,6 @@ func thresholdExceeded(offsetsX, offsetsY kadm.ListedOffsets, max int64) bool {
 	}
 
 	return false
-}
-
-func getCommittedOffsets(ctx context.Context, client *kgo.Client, topics []string) (kadm.ListedOffsets, error) {
-	adm := kadm.NewClient(client)
-	offsets, err := adm.ListCommittedOffsets(ctx, topics...)
-	if err != nil {
-		return nil, fmt.Errorf("error listing committed offsets of topics(%v): %v", topics, err)
-	}
-
-	return offsets, nil
 }
 
 func getEndOffsets(ctx context.Context, client *kgo.Client, topics []string) (kadm.ListedOffsets, error) {

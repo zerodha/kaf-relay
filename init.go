@@ -60,6 +60,7 @@ func initFilterProviders(names []string, ko *koanf.Koanf, log *slog.Logger) (map
 	return out, nil
 }
 
+// initKafkaConsumerGroup initializes a Kafka consumer group.
 func (m *consumerManager) initKafkaConsumerGroup() (*kgo.Client, error) {
 	var (
 		cfg      = m.getCurrentConfig()
@@ -120,19 +121,7 @@ func (m *consumerManager) initKafkaConsumerGroup() (*kgo.Client, error) {
 		opts = append(opts, kgo.ConsumeResetOffset(kgo.NewOffset().AtEnd()))
 	}
 
-	switch {
-	case cfg.OffsetCommitInterval == 0:
-		opts = append(opts, kgo.DisableAutoCommit())
-	case cfg.OffsetCommitInterval > 0:
-		// XXX Disable autocommit for failovers as we are not able exit autocommit goroutines safely.
-		if len(m.c.cfgs) > 1 {
-			l.Info("disabling autocommit for consumers failover mode")
-			opts = append(opts, kgo.DisableAutoCommit())
-		} else {
-			opts = append(opts, kgo.AutoCommitInterval(cfg.OffsetCommitInterval))
-			opts = append(opts, kgo.AutoCommitMarks())
-		}
-	}
+	opts = append(opts, kgo.DisableAutoCommit())
 
 	// Add authentication
 	if cfg.EnableAuth {

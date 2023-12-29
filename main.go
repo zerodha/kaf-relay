@@ -3,7 +3,6 @@ package main
 import (
 	"bytes"
 	"context"
-	"encoding/gob"
 	"fmt"
 	"log"
 	"log/slog"
@@ -25,10 +24,6 @@ var (
 	buildString = "unknown"
 )
 
-func init() {
-	gob.Register(checkPoint{})
-}
-
 func main() {
 	// Initialize config
 	f := flag.NewFlagSet("config", flag.ContinueOnError)
@@ -38,14 +33,13 @@ func main() {
 	}
 
 	var (
-		configPath            string
-		mode                  string
-		checkpoint, stopAtEnd bool
-		filterPaths           []string
+		configPath  string
+		mode        string
+		stopAtEnd   bool
+		filterPaths []string
 	)
 	f.StringVar(&configPath, "config", "config.toml", "Path to the TOML configuration file")
 	f.StringVar(&mode, "mode", "single", "single/failover")
-	f.BoolVar(&checkpoint, "checkpoint", false, "Use checkpoint file or not")
 	f.BoolVar(&stopAtEnd, "stop-at-end", false, "Stop relay at the end of offsets")
 	f.StringSliceVar(&filterPaths, "filter", []string{}, "Path to filter providers. Can specify multiple values.")
 	f.Bool("version", false, "Current version of the build")
@@ -100,35 +94,54 @@ func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
-	// create consumer manager
-	m := &consumerManager{mode: mode, reconnectInProgress: StateDisconnected}
-
-	// setup consumer
-	if err := initConsumer(ctx, m, cfg.Consumers, logger); err != nil {
-		log.Fatalf("error starting consumer: %v", err)
-	}
-
-	if checkpoint {
-		// load checkpoint
-		if err := loadCheckpoint(cfg.App.Checkpoint, m, logger); err != nil {
-			log.Fatalf("error loading checkpoint: %v", err)
-		}
-	}
+	var (
+		metr = metrics.NewSet()
+	)
 
 	// setup producer
-	p, err := initProducer(cfg.Producer, logger)
+	p, err := initProducer(ctx, cfg.Producer, logger)
 	if err != nil {
 		log.Fatalf("error starting producer: %v", err)
 	}
+	p.metrics = metr
+	p.batch = make([]*kgo.Record, 0, cfg.Producer.BatchSize)
+	p.batchCh = make(chan *kgo.Record, cfg.Producer.BatchSize)
+
+	var destTopics []string
+	for _, p := range cfg.Producer.Topics {
+		destTopics = append(destTopics, p)
+	}
+
+	destOffsets, err := getEndOffsets(ctx, p.client, destTopics)
+	if err != nil {
+		log.Fatalf("error fetching destination offsets: %v", err)
+	}
+
+	// create consumer manager
+	m := &consumerManager{
+		mode:                mode,
+		reconnectInProgress: StateDisconnected,
+	}
+
+	// setup consumer
+	if err := initConsumer(ctx, m, cfg, destOffsets, logger); err != nil {
+		log.Fatalf("error starting consumer: %v", err)
+	}
+	p.setOffsetsCommitFn(func(r []*kgo.Record) {
+		// set the topic offset for records that were successfully produced
+		m.Lock()
+		for i := 0; i < len(r); i++ {
+			m.setTopicOffsets(r[i])
+		}
+		m.Unlock()
+	})
 
 	relay := relay{
-		consumerMgr:     m,
-		producer:        p,
-		producerBatchCh: make(chan *kgo.Record, cfg.Producer.BatchSize),
-		producerBatch:   make([]*kgo.Record, 0, cfg.Producer.BatchSize),
+		consumerMgr: m,
+		producer:    p,
 
 		topics:  cfg.Topics,
-		metrics: metrics.NewSet(),
+		metrics: metr,
 		logger:  logger,
 
 		maxRetries:     cfg.App.MaxFailovers,
@@ -138,7 +151,7 @@ func main() {
 		lagThreshold:   cfg.App.LagThreshold,
 
 		stopAtEnd:  stopAtEnd,
-		endOffsets: make(map[string]map[int32]int64),
+		srcOffsets: make(map[string]map[int32]int64),
 		filters:    filters,
 	}
 
@@ -176,19 +189,10 @@ func main() {
 	srv.Shutdown(ctx)
 
 	// cleanup
-	for _, cl := range m.c.clients {
-		if cl == nil {
-			continue
+	for _, c := range m.c.clients {
+		if c != nil {
+			c.Close()
 		}
-
-		cl.Close()
 	}
 	p.client.Close()
-
-	if checkpoint {
-		// save the offsets to file
-		if err := saveCheckpoint(cfg.App.Checkpoint, m, logger); err != nil {
-			log.Fatalf("error saving checkpoint: %v", err)
-		}
-	}
 }
