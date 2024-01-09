@@ -7,8 +7,10 @@ import (
 	"fmt"
 	"log/slog"
 	"math/rand"
+	"net"
 	"os"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/twmb/franz-go/pkg/kadm"
@@ -162,8 +164,7 @@ func appendSASL(opts []kgo.Opt, cfg ClientCfg) []kgo.Opt {
 func leaveAndResetOffsets(ctx context.Context, cl *kgo.Client, cfg ConsumerGroupCfg, offsets map[string]map[int32]kgo.Offset, l *slog.Logger) error {
 	// leave group; mark the group as `Empty` before attempting to reset offsets.
 	l.Debug("leaving group", "group_id", cfg.GroupID)
-	err := cl.LeaveGroupContext(ctx)
-	if err != nil {
+	if err := leaveGroup(ctx, cl, cfg); err != nil {
 		return err
 	}
 
@@ -176,6 +177,16 @@ func leaveAndResetOffsets(ctx context.Context, cl *kgo.Client, cfg ConsumerGroup
 	}
 
 	return nil
+}
+
+// leaveGroup leaves the consumer group with our instance id
+func leaveGroup(ctx context.Context, cl *kgo.Client, cfg ConsumerGroupCfg) error {
+	req := kmsg.NewPtrLeaveGroupRequest()
+	req.Group = cfg.GroupID
+
+	req.Members = []kmsg.LeaveGroupRequestMember{{InstanceID: &instanceID}}
+	_, err := req.RequestWith(ctx, cl)
+	return err
 }
 
 // resetOffsets resets the consumer group with the given offsets map.
@@ -224,7 +235,6 @@ waitForTopicLag:
 	}
 
 	// force set consumer group offsets
-	commitOffsets := make(map[string]map[int32]kgo.EpochOffset)
 	of := make(kadm.Offsets)
 	for t, po := range offsets {
 		oMap := make(map[int32]kgo.EpochOffset)
@@ -232,9 +242,7 @@ waitForTopicLag:
 			oMap[p] = o.EpochOffset()
 			of.AddOffset(t, p, o.EpochOffset().Offset, -1)
 		}
-		commitOffsets[t] = oMap
 	}
-	cl.SetOffsets(commitOffsets)
 
 	l.Info("resetting offsets for consumer group",
 		"broker", cfg.BootstrapBrokers, "group", cfg.GroupID, "offsets", of)
@@ -243,7 +251,11 @@ waitForTopicLag:
 		l.Error("error resetting group offset", "err", err)
 	}
 
-	_ = resp
+	if err := resp.Error(); err != nil {
+		l.Error("error resetting group offset", "err", err)
+	}
+
+	// _ = resp
 	// // check for errors in offset responses
 	// for _, or := range resp {
 	// 	for _, r := range or {
@@ -257,16 +269,23 @@ waitForTopicLag:
 	return nil
 }
 
+// getBackoffFn returns the backoff function based on the config
+func getBackoffFn(cfg BackoffCfg) func(int) time.Duration {
+	if cfg.Enable {
+		return retryBackoff(cfg.Min, cfg.Max)
+	} else {
+		return func(int) time.Duration {
+			return 0
+		}
+	}
+}
+
 // retryBackoff is basic backoff fn from franz-go
 // ref: https://github.com/twmb/franz-go/blob/01651affd204d4a3577a341e748c5d09b52587f8/pkg/kgo/go#L450
-func retryBackoff() func(int) time.Duration {
+func retryBackoff(min, max time.Duration) func(int) time.Duration {
 	var rngMu sync.Mutex
 	rng := rand.New(rand.NewSource(time.Now().UnixNano()))
 	return func(fails int) time.Duration {
-		const (
-			min = 1 * time.Second
-			max = 20 * time.Second / 2
-		)
 		if fails <= 0 {
 			return min
 		}
@@ -348,65 +367,50 @@ func hasReachedEnd(offsets map[string]map[int32]int64) bool {
 	return true
 }
 
-// Node represents a node with its weight
-type Node struct {
-	Down   bool
-	ID     int
-	Weight int
-}
-
-// NodeTracker keeps track of the healthiest node
-type NodeTracker struct {
-	sync.Mutex
-
-	nodes      []Node
-	healthiest Node
-}
-
-// NewNodeTracker creates a new HealthiestNodeTracker
-func NewNodeTracker(nodes []Node) *NodeTracker {
-	return &NodeTracker{
-		nodes:      nodes,
-		healthiest: Node{Down: true, Weight: -1},
+// checkErr checks if the given error is a network error or not
+func checkErr(err error) bool {
+	if netError, ok := err.(net.Error); ok && netError.Timeout() {
+		return true
 	}
-}
 
-// GetHealthy returns the healthiest node without blocking
-func (h *NodeTracker) GetHealthy() Node {
-	h.Lock()
-	node := h.healthiest
-	h.Unlock()
-
-	return node
-}
-
-func (h *NodeTracker) PushUp(nodeID int, weight int) {
-	h.updateWeight(nodeID, weight, false)
-}
-
-func (h *NodeTracker) PushDown(nodeID int) {
-	h.updateWeight(nodeID, -1, true)
-}
-
-// updateWeight updates the weight for a particular node
-func (h *NodeTracker) updateWeight(nodeID int, weight int, down bool) {
-	h.Lock()
-	defer h.Unlock()
-
-	var (
-		minWeight = -1
-	)
-	for i := 0; i < len(h.nodes); i++ {
-		node := h.nodes[i]
-		if node.ID == nodeID {
-			node.Down = down
-			node.Weight = weight
+	switch t := err.(type) {
+	case *net.OpError:
+		if t.Op == "dial" {
+			return true
+		} else if t.Op == "read" {
+			return true
 		}
-		h.nodes[i] = node
 
-		if node.Weight > minWeight && !node.Down {
-			minWeight = node.Weight
-			h.healthiest = node
+	case syscall.Errno:
+		if t == syscall.ECONNREFUSED {
+			return true
 		}
 	}
+
+	return false
+}
+
+// healthcheck checks if the given address is reachable or not
+func healthcheck(ctx context.Context, addrs []string, timeout time.Duration) bool {
+	d := net.Dialer{Timeout: timeout}
+	up := false
+	for _, addr := range addrs {
+		conn, err := d.DialContext(ctx, "tcp", addr)
+		if err != nil && checkErr(err) {
+			continue
+		}
+
+		if conn != nil {
+			conn.Close()
+		}
+
+		// atleast one address is reachable
+		ok := err == nil
+		if ok {
+			up = true
+			break
+		}
+	}
+
+	return up
 }

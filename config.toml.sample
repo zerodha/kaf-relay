@@ -1,15 +1,26 @@
 [app]
-max_failovers = 3
+max_failovers = -1 # infinite
 log_level = "debug"
 metrics_server_addr = ":7081"
 
 # In failover mode, if we breach the lag threshold in serverA compared to serverB we switch over to serverB immediately
 lag_threshold = 100
-# Frequency at which we need to poll for lags
-lag_monitor_frequency = "500ms"
+# Frequency at which we need to poll for healthiness/lags
+node_health_check_frequency = "500ms"
+
 # Max request wait time to check if a node is down
 max_request_duration = "100ms"
 
+
+// Configuration for retry backoff settings.
+// The retry backoff feature can be enabled or disabled.
+// The minimum and maximum backoff durations can be specified.
+[app.retry_backoff]
+enable = true
+min = "1s"
+max = "10s"
+
+// List of consumers for failover scenarios
 [[consumers]]
 name = "node1"
 servers = ["node1:9092"]
@@ -24,7 +35,7 @@ offset_commit_interval = "100ms"
 initial_offset = "start"
 group_id = "relay_group1"
 
-max_failovers = 3
+max_failovers = -1 # infinite
 
 enable_tls = false
 client_key_path = ""
@@ -47,7 +58,7 @@ offset_commit_interval = "100ms"
 initial_offset = "start"
 group_id = "relay_group2"
 
-max_failovers = 3
+max_failovers = -1 # infinite
 
 enable_tls = false
 client_key_path = ""
@@ -56,9 +67,11 @@ ca_cert_path = ""
 
 enable_log = false
 
+// X => Y topic remapping where X is source topic and Y is destination topic
 [topics]
 topicA = "machineX_topicA"
 
+// Destination kafka producer configuration
 [producer]
 name = "node3"
 servers = ["node3:9092"]
@@ -66,9 +79,12 @@ enable_auth = true
 sasl_mechanism = "PLAIN" # PLAIN/SCRAM-SHA-256/SCRAM-SHA-512
 username = "user-y"
 password = "pass-y"
-max_retries = 3
+max_retries = -1
+enable_idempotency = true
+commit_ack_type = "cluster"
 flush_frequency = "20ms"
 session_timeout = "6s"
+flush_batch_size = 1000
 batch_size = 1000
 max_message_bytes = 10000000
 
@@ -79,7 +95,7 @@ ca_cert_path = ""
 
 enable_log = false
 
-
+// Custom go-plugin filter to load to filter messages when relaying
 [filter.testfilter]
 config = '''
 {

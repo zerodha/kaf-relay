@@ -13,8 +13,10 @@ import (
 
 // producer is a holder for the kafka producer client.
 type producer struct {
-	client *kgo.Client
-	cfg    ProducerCfg
+	client     *kgo.Client
+	cfg        ProducerCfg
+	backoffCfg BackoffCfg
+	maxReqTime time.Duration
 
 	batchCh chan *kgo.Record
 	batch   []*kgo.Record
@@ -23,41 +25,11 @@ type producer struct {
 	metrics *metrics.Set
 }
 
-// offsetManager is a holder for the topic offsets.
-type offsetManager struct {
-	Offsets map[string]map[int32]kgo.Offset
-}
-
-// Get returns the topic offsets.
-func (o *offsetManager) Get() map[string]map[int32]kgo.Offset {
-	return o.Offsets
-}
-
-// New creates a new kafka Producer client.
-func New(cfg ProducerCfg, m *metrics.Set, l *slog.Logger) *producer {
-	return &producer{
-		cfg:     cfg,
-		logger:  l,
-		metrics: m,
-		batch:   make([]*kgo.Record, 0, cfg.BatchSize),
-		batchCh: make(chan *kgo.Record, cfg.BatchSize),
-	}
-}
-
-// SetMetrics sets the metrics set.
-func (p *producer) SetMetrics(m *metrics.Set) {
-	p.metrics = m
-}
-
-// SetClient sets the kafka client.
-func (p *producer) SetClient(c *kgo.Client) {
-	p.client = c
-}
-
 // Close closes the kafka client.
 func (p *producer) Close() {
 	if p.client != nil {
-		p.client.Close()
+		// prevent blocking on close
+		p.client.PurgeTopicsFromProducing()
 	}
 }
 
@@ -79,51 +51,56 @@ func (p *producer) StartWorker(ctx context.Context) error {
 	// Flush the Producer after the poll loop is over.
 	defer func() {
 		if err := p.client.Flush(ctx); err != nil {
-			p.logger.Error("error while flushing the Producer", "err", err)
+			p.logger.Error("error while flushing the producer", "err", err)
 		}
 	}()
+
+	// drain drains the producer channel and buffer on exit.
+	drain := func() error {
+		now := time.Now()
+		// drain the batch
+		for rec := range p.batchCh {
+			p.batch = append(p.batch, rec)
+		}
+
+		ct := len(p.batch)
+		// flush Producer on exit
+		if ct > 0 {
+			ctx, cancel := context.WithTimeout(context.Background(), p.cfg.SessionTimeout)
+			defer cancel()
+
+			if err := p.flush(ctx); err != nil {
+				return err
+			}
+		}
+
+		p.logger.Debug("flushing producer batch", "elapsed", time.Since(now).Seconds(), "count", ct)
+		// reset
+		p.batch = p.batch[:0]
+		return nil
+	}
 
 	for {
 		select {
 		case <-ctx.Done():
-			// drain the batch
-			for rec := range p.batchCh {
-				p.batch = append(p.batch, rec)
-			}
-			//p.offsetsCommitFn(p.batch)
-
-			// flush Producer on exit
-			if len(p.batch) > 0 {
-				ctx, cancel := context.WithTimeout(context.Background(), p.cfg.SessionTimeout)
-				defer cancel()
-
-				if err := p.flush(ctx); err != nil {
-					return err
-				}
+			if err := drain(); err != nil {
+				return err
 			}
 
-			// reset
-			p.batch = p.batch[:0]
 			return ctx.Err()
 
 		// enqueue the message to the Producer batch and flush if batch size is reached.
 		case msg, ok := <-p.batchCh:
-
 			// cleanup; close the Producer batch channel and flush the remaining messages
 			if !ok {
-				now := time.Now()
-				ct := 0
-				// ignore other messages; we can fetch the produced offsets from Producer topics and start from there on boot.
-				for range p.batchCh {
-					ct++
+				if err := drain(); err != nil {
+					return err
 				}
 
-				p.logger.Debug("flushing Producer batch", "elapsed", time.Since(now), "count", ct)
 				return nil
 			}
 
 			p.batch = append(p.batch, msg)
-
 			if len(p.batch) >= p.cfg.FlushBatchSize {
 				if err := p.flush(ctx); err != nil {
 					return err
@@ -148,12 +125,17 @@ func (p *producer) flush(ctx context.Context) error {
 	var (
 		retries = 0
 		sent    bool
-		backOff = retryBackoff()
+		backOff = getBackoffFn(p.backoffCfg)
 	)
 
 retry:
 	for retries < p.cfg.MaxRetries || p.cfg.MaxRetries == IndefiniteRetry {
 		batchLen := len(p.batch)
+
+		// check if the destination cluster is healthy before attempting to produce again.
+		if retries > 0 && !healthcheck(ctx, p.cfg.BootstrapBrokers, p.maxReqTime) {
+			continue
+		}
 
 		p.logger.Debug("producing message", "broker", p.client.OptValue(kgo.SeedBrokers), "msgs", batchLen, "retry", retries)
 		results := p.client.ProduceSync(ctx, p.batch...)
@@ -163,15 +145,20 @@ retry:
 			err      error
 			failures []*kgo.Record
 		)
-		for _, res := range results {
+		for idx, res := range results {
 			// exit if context is cancelled
 			if res.Err == context.Canceled {
 				return ctx.Err()
 			}
 
+			// Gather the failed messages and retry.
 			if res.Err != nil {
-				failures = append(failures, res.Record)
-				p.logger.Error("error producing message results", "err", res.Err)
+				// reset context, timestamp for the given message to be produced again
+				// read: kgo.Client{}.Produce() comment
+				p.batch[idx].Timestamp = time.Time{}
+				p.batch[idx].Context = nil
+
+				failures = append(failures, p.batch[idx])
 				err = res.Err
 				continue
 			}
@@ -188,7 +175,17 @@ retry:
 		if err != nil {
 			p.logger.Error("error producing message", "err", err, "failed_count", batchLen, "retry", retries)
 
+			bufRecs := p.client.BufferedProduceRecords()
+			if bufRecs > 0 {
+				if err := p.client.AbortBufferedRecords(ctx); err != nil {
+					p.logger.Error("error aborting buffered records", "err", err)
+				} else {
+					p.logger.Debug("aborted buffered records, retrying failed messages", "recs", bufRecs)
+				}
+			}
+
 			// reset the batch to the failed messages
+			p.batch = p.batch[:0]
 			p.batch = failures
 			retries++
 

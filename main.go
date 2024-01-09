@@ -102,10 +102,11 @@ func main() {
 	)
 
 	// setup producer
-	prod, err := initProducer(ctx, cfg.Producer, metr, logger)
+	prod, err := initProducer(ctx, cfg.Producer, cfg.App.Backoff, metr, logger)
 	if err != nil {
 		log.Fatalf("error starting producer: %v", err)
 	}
+	prod.maxReqTime = cfg.App.MaxRequestDuration
 
 	// setup offsets manager with the destination offsets
 	destOffsets, err := prod.GetEndOffsets(ctx, cfg.App.MaxRequestDuration)
@@ -127,6 +128,8 @@ func main() {
 	cons := &consumer{
 		client:      nil, // init during track healthy
 		cfgs:        cfg.Consumers,
+		maxReqTime:  cfg.App.MaxRequestDuration,
+		backoffCfg:  cfg.App.Backoff,
 		offsetMgr:   offsetMgr,
 		nodeTracker: NewNodeTracker(n),
 		l:           logger,
@@ -143,12 +146,12 @@ func main() {
 		metrics: metr,
 		logger:  logger,
 
-		maxRetries:     cfg.App.MaxFailovers,
-		retryBackoffFn: retryBackoff(),
+		maxRetries: cfg.App.MaxFailovers,
+		backoffCfg: cfg.App.Backoff,
 
-		lagMonitorFreq: cfg.App.LagMonitorFreq,
-		lagThreshold:   cfg.App.LagThreshold,
-		maxReqTime:     cfg.App.MaxRequestDuration,
+		nodeHealthCheckFreq: cfg.App.NodeHealthCheckFreq,
+		lagThreshold:        cfg.App.LagThreshold,
+		maxReqTime:          cfg.App.MaxRequestDuration,
 
 		stopAtEnd:   stopAtEnd,
 		srcOffsets:  make(map[string]map[int32]int64),

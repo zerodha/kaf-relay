@@ -15,11 +15,16 @@ import (
 	"github.com/twmb/franz-go/pkg/kgo"
 )
 
-// initProducer initializes the kafka producer client.
-func initProducer(ctx context.Context, cfg ProducerCfg, m *metrics.Set, l *slog.Logger) (*producer, error) {
-	l.Info("creating producer", "broker", cfg.BootstrapBrokers)
+var (
+	// instanceID is for the static consumer group memeber.
+	instanceID = "kaf-relay"
+)
 
-	prod := New(cfg, m, l)
+// onAssignedCb is a callback function for the consumer group.
+type onAssignedCb func(childCtx context.Context, cl *kgo.Client, claims map[string][]int32)
+
+// getProducerClient returns a kafka producer client.
+func getProducerClient(ctx context.Context, cfg ProducerCfg, bCfg BackoffCfg, l *slog.Logger) (*kgo.Client, error) {
 	opts := []kgo.Opt{
 		kgo.AllowAutoTopicCreation(),
 		kgo.ProduceRequestTimeout(cfg.SessionTimeout),
@@ -61,7 +66,7 @@ func initProducer(ctx context.Context, cfg ProducerCfg, m *metrics.Set, l *slog.
 
 	var (
 		retries = 0
-		backoff = retryBackoff()
+		backoff = getBackoffFn(bCfg)
 		err     error
 		cl      *kgo.Client
 	)
@@ -80,7 +85,6 @@ outerLoop:
 				waitTries(ctx, backoff(retries))
 				continue
 			}
-			prod.SetClient(cl)
 
 			// Get the destination topics
 			var topics []string
@@ -107,28 +111,43 @@ outerLoop:
 		return nil, err
 	}
 
-	return prod, nil
+	return cl, nil
+}
+
+// initProducer initializes the kafka producer client.
+func initProducer(ctx context.Context, pCfg ProducerCfg, bCfg BackoffCfg, m *metrics.Set, l *slog.Logger) (*producer, error) {
+	l.Info("creating producer", "broker", pCfg.BootstrapBrokers)
+
+	p := &producer{
+		cfg:        pCfg,
+		backoffCfg: bCfg,
+		logger:     l,
+		metrics:    m,
+		batch:      make([]*kgo.Record, 0, pCfg.BatchSize),
+		//batchCh:    make(chan *kgo.Record, pCfg.BatchSize),
+		batchCh: make(chan *kgo.Record),
+	}
+	cl, err := getProducerClient(ctx, pCfg, bCfg, l)
+	if err != nil {
+		return nil, err
+	}
+
+	p.client = cl
+
+	return p, nil
 }
 
 // initConsumerGroup initializes a Kafka consumer group.
-func (c *consumer) initConsumerGroup(ctx context.Context, cfg ConsumerGroupCfg) (*kgo.Client, error) {
+func initConsumerGroup(ctx context.Context, cfg ConsumerGroupCfg, onAssigned onAssignedCb) (*kgo.Client, error) {
 	opts := []kgo.Opt{
 		kgo.SeedBrokers(cfg.BootstrapBrokers...),
 		kgo.FetchMaxWait(cfg.MaxWaitTime),
 		kgo.ConsumeTopics(cfg.Topics...),
 		kgo.ConsumerGroup(cfg.GroupID),
+		kgo.InstanceID(instanceID),
 		kgo.SessionTimeout(cfg.SessionTimeout),
 		kgo.DisableAutoCommit(),
-		kgo.OnPartitionsAssigned(func(childCtx context.Context, cl *kgo.Client, claims map[string][]int32) {
-			select {
-			case <-ctx.Done():
-				return
-			case <-childCtx.Done():
-				return
-			default:
-				c.l.Debug("partitioned assigned", "broker", cl.OptValue(kgo.SeedBrokers), "claims", claims)
-			}
-		}),
+		kgo.OnPartitionsAssigned(onAssigned),
 	}
 
 	if cfg.EnableLog {

@@ -28,8 +28,17 @@ type AppCfg struct {
 	LogLevel          slog.Level `koanf:"log_level"`
 	MetricsServerAddr string     `koanf:"metrics_server_addr"`
 
-	LagThreshold   int64         `koanf:"lag_threshold"`
-	LagMonitorFreq time.Duration `koanf:"lag_monitor_frequency"`
+	LagThreshold        int64         `koanf:"lag_threshold"`
+	NodeHealthCheckFreq time.Duration `koanf:"node_health_check_frequency"`
+
+	Backoff BackoffCfg `koanf:"retry_backoff"`
+}
+
+// BackoffCfg is the retry backoff config.
+type BackoffCfg struct {
+	Enable bool          `koanf:"enable"`
+	Min    time.Duration `koanf:"min"`
+	Max    time.Duration `koanf:"max"`
 }
 
 // ClientCfg is the message broker's client config.
