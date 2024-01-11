@@ -124,7 +124,10 @@ func (r *relay) startConsumerWorker(ctx context.Context) error {
 
 	r.pollCancel = pollCancelFn
 
-	var nodeID = -1
+	var (
+		nodeID    = -1
+		firstPoll = true
+	)
 pollLoop:
 	for {
 		// exit if max retries is exhausted
@@ -144,6 +147,8 @@ pollLoop:
 				succ = false
 				err  error
 			)
+
+			r.logger.Info("poll loop requesting healthy node")
 			for !succ {
 				select {
 				case <-ctx.Done():
@@ -151,10 +156,9 @@ pollLoop:
 				default:
 				}
 
-				r.logger.Debug("poll loop requesting healthy node")
 				nodeID, err = r.consumer.GetHealthy(ctx)
 				if err != nil {
-					r.logger.Error("poll loop could not get healthy node", "err", err)
+					r.logger.Debug("poll loop could not get healthy node", "err", err)
 					r.retries++
 					waitTries(ctx, backoff(r.retries))
 					continue
@@ -162,7 +166,7 @@ pollLoop:
 
 				err = r.consumer.Connect(ctx, r.consumer.cfgs[nodeID])
 				if err != nil {
-					r.logger.Error("poll loop could not re-init consumer", "err", err)
+					r.logger.Debug("poll loop could not re-init consumer", "err", err)
 					r.retries++
 					waitTries(ctx, backoff(r.retries))
 					continue
@@ -176,14 +180,24 @@ pollLoop:
 			r.pollCancel = pollCancelFn
 			defer pollCancelFn()
 
-			r.logger.Info("poll loop sending current node", "id", nodeID)
-			r.nodeCh <- nodeID
-
 		default:
 			cl := r.consumer.client
 
 			// Stop the poll loop if we reached the end of offsets fetched on boot.
 			if r.stopAtEnd {
+				if firstPoll {
+					of, err := getEndOffsets(ctx, cl, r.consumer.cfgs[nodeID].Topics, r.maxReqTime)
+					if err != nil {
+						r.logger.Error("could not get end offsets (first poll); sending unhealthy signal")
+						r.unhealthyCh <- struct{}{}
+
+						continue pollLoop
+					}
+
+					r.setSourceOffsets(of)
+					firstPoll = false
+				}
+
 				if hasReachedEnd(r.srcOffsets) {
 					r.logger.Info("reached end of offsets; stopping relay", "broker", cl.OptValue(kgo.SeedBrokers), "offsets", r.srcOffsets)
 					return nil
@@ -196,11 +210,10 @@ pollLoop:
 			if fetches.IsClientClosed() {
 				r.retries++
 				r.logger.Error("client closed; sending unhealthy signal")
-				r.unhealthyCh <- struct{}{}
-
 				if ok := r.consumer.nodeTracker.PushDown(nodeID); ok {
 					r.logger.Debug("updated weight", "node", nodeID, "weight", -1)
 				}
+				r.unhealthyCh <- struct{}{}
 
 				continue pollLoop
 			}
@@ -211,12 +224,12 @@ pollLoop:
 				r.retries++
 				waitTries(ctx, backoff(r.retries))
 				r.logger.Error("fetch errors; sending unhealthy signal", "err", err.Err)
-
-				r.unhealthyCh <- struct{}{}
-
 				if ok := r.consumer.nodeTracker.PushDown(nodeID); ok {
 					r.logger.Debug("updated weight", "node", nodeID, "weight", -1)
 				}
+
+				r.unhealthyCh <- struct{}{}
+
 				continue pollLoop
 			}
 
@@ -308,10 +321,6 @@ func (r *relay) trackHealthy(ctx context.Context) error {
 		clients[i] = cl
 	}
 
-	var (
-		curr        = 0
-		isFirstNode = true
-	)
 	for {
 		select {
 		case <-ctx.Done():
@@ -325,95 +334,88 @@ func (r *relay) trackHealthy(ctx context.Context) error {
 
 			return ctx.Err()
 
-		case nodeID := <-r.nodeCh:
-			r.logger.Info("tracker received current node from poll loop", "id", nodeID)
-			curr = nodeID
-
 		case <-tick.C:
 			r.logger.Debug("checking topic lag", "freq", r.nodeHealthCheckFreq.Seconds())
 			var (
-				n           = len(cfgs)
-				cl          *kgo.Client
-				currOffsets kadm.ListedOffsets
-				err         error
+				n  = len(cfgs)
+				cl *kgo.Client
 			)
 
-			// check in the next iteration
-			currOffsets, err = getEndOffsets(ctx, clients[curr], cfgs[curr].Topics, r.maxReqTime)
-			if err != nil && currOffsets == nil {
-				r.logger.Debug("error fetching end offset for current client", "err", err, "node", curr)
-				if ok := r.consumer.nodeTracker.PushDown(curr); ok {
-					r.logger.Debug("updated weight", "node", curr, "weight", -1)
-				}
-			}
-
+			// Fill metadata for each node
+			wg := &sync.WaitGroup{}
+			metadata := make([]*NodeMeta, n)
 			for i := 0; i < n; i++ {
-				// Already fetched (or ignored) current offsets
-				if i == curr {
-					continue
-				}
+				r.logger.Debug("tracker checking node", "id", i)
 
-				r.logger.Debug("tracker checking node", "id", i, "curr", curr)
-				cfg := cfgs[i]
-				cl = clients[i]
+				node := &NodeMeta{ID: i}
+				metadata[i] = node
 
 				// create a new client if it doesn't exist
-				if cl == nil {
+				if clients[i] == nil {
 					var err error
-					cl, err = getClient(cfg)
+					cl, err = getClient(cfgs[i])
 					if err != nil {
 						r.logger.Error("error creating admin client for tracking lag", "err", err)
-						if ok := r.consumer.nodeTracker.PushDown(i); ok {
-							r.logger.Debug("updated weight", "node", i, "weight", -1)
-						}
 						continue
 					}
 
 					clients[i] = cl
 				}
 
-				// get end offsets using admin api
-				of, err := getEndOffsets(ctx, cl, cfg.Topics, r.maxReqTime)
-				if err != nil {
-					r.logger.Debug("error fetching end offsets; tracking topic lag", "err", err)
+				// populate offsets, whether the node is healthy in nodemeta.
+				wg.Add(1)
+				go func(index int) {
+					populateMetadata(ctx, clients[index], cfgs[index], node, r.maxReqTime, r.logger)
+					wg.Done()
+				}(i)
+			}
+			wg.Wait()
+
+			// find the current node and rearrange the nodes in node tracker depending on healthiness
+			currentIndex := -1
+			for i := 0; i < n; i++ {
+				nodeMeta := metadata[i]
+				r.logger.Debug("tracker updating node", "id", i, "data", nodeMeta)
+
+				if !nodeMeta.Healthy {
+					r.logger.Debug("pushing down", "id", i)
 					if ok := r.consumer.nodeTracker.PushDown(i); ok {
 						r.logger.Debug("updated weight", "node", i, "weight", -1)
 					}
 					continue
 				}
 
-				// weight = sum of offsets across topic:partition to decide arrange the nodes leading at the moment
+				if nodeMeta.IsCurrent {
+					currentIndex = i
+				}
+
 				var weight int
-				of.Each(func(lo kadm.ListedOffset) {
+				nodeMeta.Offsets.Each(func(lo kadm.ListedOffset) {
 					weight += int(lo.Offset)
 				})
 
+				r.logger.Debug("pushing up", "id", i, "weight", weight)
 				if ok := r.consumer.nodeTracker.PushUp(i, weight); ok {
 					r.logger.Debug("updated weight", "node", i, "weight", weight)
 				}
+			}
 
-				// set end offsets
-				if isFirstNode && r.stopAtEnd {
-					r.logger.Debug("setting up consumer offsets to exit automatically on consuming everything")
-					r.setSourceOffsets(of)
+			// could not find current node; check in next tick
+			if currentIndex == -1 {
+				continue
+			}
 
-					isFirstNode = false
-				}
-
-				// skip lag check for current node
-				if r.lagThreshold == 0 || currOffsets == nil {
+			for i := 0; i < n; i++ {
+				if i == currentIndex || !metadata[i].Healthy {
 					continue
 				}
 
 				// check if threshold is exceeded or not
-				if thresholdExceeded(of, currOffsets, r.lagThreshold) {
-					r.logger.Error("unhealthy node; threshold exceeded", "broker", cfgs[curr].BootstrapBrokers, "threshold", r.lagThreshold)
+				if thresholdExceeded(metadata[i].Offsets, metadata[currentIndex].Offsets, r.lagThreshold) {
+					r.logger.Error("unhealthy node; threshold exceeded", "broker", cfgs[currentIndex].BootstrapBrokers, "threshold", r.lagThreshold)
 
 					// exit the consumer poll loop and wait till consumer poll gets a healthy node
 					r.pollCancel()
-
-					// update the healthy node from consumer loop in this goroutine
-					curr = <-r.nodeCh
 				}
 			}
 		}

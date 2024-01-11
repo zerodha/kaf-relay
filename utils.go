@@ -340,6 +340,29 @@ func thresholdExceeded(offsetsX, offsetsY kadm.ListedOffsets, max int64) bool {
 	return false
 }
 
+// isCurrentNode checks if group is active and assigned the topics
+func isCurrentNode(ctx context.Context, client *kgo.Client, group string, topics []string, timeout time.Duration) (bool, error) {
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	adm := kadm.NewClient(client)
+	desc, err := adm.DescribeGroups(ctx)
+	if err != nil {
+		return false, fmt.Errorf("error listing end offsets of topics(%v): %v", topics, err)
+	}
+
+	tSet := desc.AssignedPartitions()
+	isCurr := true
+	for _, t := range topics {
+		if !tSet.Lookup(t, 0) {
+			isCurr = false
+			break
+		}
+	}
+
+	return isCurr, nil
+}
+
 // getEndOffsets returns the end offsets of the given topics
 func getEndOffsets(ctx context.Context, client *kgo.Client, topics []string, timeout time.Duration) (kadm.ListedOffsets, error) {
 	ctx, cancel := context.WithTimeout(ctx, timeout)
@@ -413,4 +436,40 @@ func healthcheck(ctx context.Context, addrs []string, timeout time.Duration) boo
 	}
 
 	return up
+}
+
+// NodeMeta represents the metadata of a node in the cluster.
+type NodeMeta struct {
+	ID        int
+	Offsets   kadm.ListedOffsets
+	IsCurrent bool
+	Healthy   bool
+}
+
+// populateMetadata populates the given NodeMeta with the offsets and healthiness of the node.
+func populateMetadata(ctx context.Context, cl *kgo.Client, cfg ConsumerGroupCfg, node *NodeMeta, timeout time.Duration, l *slog.Logger) {
+	cleanup := func() {
+		node.Offsets = nil
+		node.IsCurrent = false
+		node.Healthy = false
+	}
+
+	// check in the next iteration
+	offsets, err := getEndOffsets(ctx, cl, cfg.Topics, timeout)
+	if err != nil && offsets == nil {
+		l.Debug("error fetching end offset for current client", "err", err)
+		cleanup()
+		return
+	}
+
+	isCurr, err := isCurrentNode(ctx, cl, cfg.GroupID, cfg.Topics, timeout)
+	if err != nil {
+		l.Debug("error fetching end offset for current client", "err", err)
+		cleanup()
+		return
+	}
+
+	node.Offsets = offsets
+	node.IsCurrent = isCurr
+	node.Healthy = true
 }

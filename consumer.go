@@ -101,6 +101,8 @@ func (c *consumer) Connect(ctx context.Context, cfg ConsumerGroupCfg) error {
 		if err != nil {
 			return err
 		}
+
+		c.l.Debug("waiting till partition assigned", "broker", cl.OptValue(kgo.SeedBrokers))
 		<-ready
 
 		offsets := c.GetOffsets()
@@ -186,23 +188,19 @@ func (h *NodeTracker) updateWeight(nodeID int, weight int, down bool) bool {
 		return false
 	}
 
-	// fast path
-	if node.Down == down && node.Weight == weight {
-		return false
-	}
-
 	node.Down = down
 	node.Weight = weight
 	h.nodes[nodeID] = node
 
-	// if healthiest node is current node, we ll have to update it since its weight has changed
-	if nodeID == h.healthiest.ID {
+	if h.healthiest.ID == nodeID {
 		h.healthiest = node
+		return false
 	}
 
 	// assign if the current node is the healthiest
-	if weight > h.healthiest.Weight && !down {
+	if (weight >= h.healthiest.Weight || h.healthiest.Down) && !down {
 		h.healthiest = node
 	}
+
 	return true
 }
