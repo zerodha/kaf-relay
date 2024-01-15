@@ -43,6 +43,19 @@ func (p *producer) GetBatchCh() chan *kgo.Record {
 	return p.batchCh
 }
 
+// prepareRecord checks if custom topic partition mapping is defined.
+// If required, it updates the records partition
+func (p *producer) prepareRecord(rec *kgo.Record) {
+	if p.cfg.TopicsPartition == nil {
+		return
+	}
+
+	part, ok := p.cfg.TopicsPartition[rec.Topic]
+	if ok {
+		rec.Partition = part
+	}
+}
+
 // startProducerWorker starts Producer worker which flushes the Producer batch at a given frequency.
 func (p *producer) StartWorker(ctx context.Context) error {
 	tick := time.NewTicker(p.cfg.FlushFrequency)
@@ -60,6 +73,7 @@ func (p *producer) StartWorker(ctx context.Context) error {
 		now := time.Now()
 		// drain the batch
 		for rec := range p.batchCh {
+			p.prepareRecord(rec)
 			p.batch = append(p.batch, rec)
 		}
 
@@ -100,6 +114,7 @@ func (p *producer) StartWorker(ctx context.Context) error {
 				return nil
 			}
 
+			p.prepareRecord(msg)
 			p.batch = append(p.batch, msg)
 			if len(p.batch) >= p.cfg.FlushBatchSize {
 				if err := p.flush(ctx); err != nil {

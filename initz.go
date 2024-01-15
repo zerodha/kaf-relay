@@ -88,7 +88,7 @@ outerLoop:
 			}
 
 			// test connectivity and ensures destination topics exists.
-			err = testConnection(cl, cfg.SessionTimeout, topics)
+			err = testConnection(cl, cfg.SessionTimeout, topics, cfg.TopicsPartition)
 			if err != nil {
 				l.Error("error connecting to producer", "err", err)
 				retries++
@@ -189,7 +189,7 @@ func initConsumerGroup(ctx context.Context, cfg ConsumerGroupCfg, l *slog.Logger
 		return nil, err
 	}
 
-	if err := testConnection(cl, cfg.SessionTimeout, cfg.Topics); err != nil {
+	if err := testConnection(cl, cfg.SessionTimeout, cfg.Topics, nil); err != nil {
 		return nil, err
 	}
 
