@@ -1,19 +1,19 @@
 <a href="https://zerodha.tech"><img src="https://zerodha.tech/static/images/github-badge.svg" align="right" /></a>
-## Relay
+## kaf-relay
 
-Relay is an opinionated program designed to replicate messages on topics from one Kafka cluster to another Kafka cluster.
+kaf-relay is an opinionated, high performance program for keeping Kafka clusters in sync by replicating topics. It is specfically designed for high-availability with background healthchecks, offset tracking, and topic lag checks.
 
 ### Features
 
 * Topic Forwarding: Relay consumes messages from topics in one Kafka cluster and forwards them to topics in another Kafka cluster.
 * Authentication: PLAIN, SCRAM-SHA-256, SCRAM-SHA-512
 * Topic Remapping: Relay allows you to specify topic remappings, enabling you to map a topic from the source cluster to a different topic in the destination cluster.
-* Consumer group failover: Assuming we have multiple identical kafkas (separate nodes 1...N) at the upstream side, this mode allows us to fallback to the next kafka in a round-robin fashion if current broker goes down. This allows us to deduplicate messages downstream without using any external stores.
-* Topic lag failover: In addition to consumer group failover, if there is a lag between node1 and node2, we initiate an immediate switch-over to node2.
+* Consumer group failover: Given identical Kafka instances (separate nodes 1...N) at the upstream, instantly switch over to the next node in a round-robin fashion on current node failure. Offset tracking between source and target nodes allows de-duplication without external stores.
+* Topic lag failover: Monitors offsets amongst N identical nodes to detect lags and to instantly switch upstream consumer nodes.
 * Stop at end: Flag `--stop-at-end` allows the program to stop after reaching the end of consumer topic offsets that was picked up on boot.
 * Filter messages using go plugins: Flag `--filter` allows the program to filter messages based on the logic in plugin code.
 
-#### relay in different modes
+#### kaf-relay in different modes
 
 ![image](./screenshots/relay.png)
 
@@ -25,7 +25,7 @@ Relay is an opinionated program designed to replicate messages on topics from on
 ## Installation
 
 ```bash
-git clone https://github.com/joeirimpan/kaf-relay.git
+git clone https://github.com/zerodha/kaf-relay.git
 cd kaf-relay
 make dist
 ```
