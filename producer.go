@@ -171,6 +171,8 @@ retry:
 			p.metrics.GetOrCreateCounter(fmt.Sprintf(RelayMetric, srcTopic, destTopic, part)).Inc()
 		}
 
+		p.logger.Debug("produced last offset", "offset", results[len(results)-1].Record.Offset, "batch", batchLen, "retry", retries)
+
 		// retry if there is an error
 		if err != nil {
 			p.logger.Error("error producing message", "err", err, "failed_count", batchLen, "retry", retries)

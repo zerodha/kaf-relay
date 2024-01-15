@@ -74,61 +74,33 @@ func (c *consumer) GetHealthy(ctx context.Context) (int, error) {
 
 // reinit reinitializes the consumer group
 func (c *consumer) Connect(ctx context.Context, cfg ConsumerGroupCfg) error {
-	backoff := getBackoffFn(c.backoffCfg)
+	c.l.Debug("reinitializing consumer group", "broker", cfg.BootstrapBrokers)
 
-	ready := make(chan struct{})
-	onAssigned := func(childCtx context.Context, cl *kgo.Client, claims map[string][]int32) {
-		select {
-		case <-ctx.Done():
-			return
-		case <-childCtx.Done():
-			return
-		default:
-			c.l.Debug("partition assigned", "broker", cl.OptValue(kgo.SeedBrokers), "claims", claims)
-			ready <- struct{}{}
-		}
+	// tcp health check
+	if ok := healthcheck(ctx, cfg.BootstrapBrokers, c.maxReqTime); !ok {
+		return ErrorNoHealthy
 	}
 
-	for retryCount := 0; retryCount < 3; retryCount++ {
-		c.l.Debug("reinitializing consumer group", "broker", cfg.BootstrapBrokers, "retries", retryCount)
+	cl, err := initConsumerGroup(ctx, cfg, c.l)
+	if err != nil {
+		return err
+	}
 
-		// tcp health check
-		if ok := healthcheck(ctx, cfg.BootstrapBrokers, c.maxReqTime); !ok {
-			return ErrorNoHealthy
-		}
-
-		cl, err := initConsumerGroup(ctx, cfg, onAssigned)
+	offsets := c.GetOffsets()
+	if offsets != nil {
+		err = leaveAndResetOffsets(ctx, cl, cfg, offsets, c.l)
 		if err != nil {
+			c.l.Error("error resetting offsets", "err", err)
 			return err
 		}
 
-		c.l.Debug("waiting till partition assigned", "broker", cl.OptValue(kgo.SeedBrokers))
-		<-ready
-
-		offsets := c.GetOffsets()
-		if offsets != nil {
-			err = leaveAndResetOffsets(ctx, cl, cfg, offsets, c.l)
-			if err != nil {
-				c.l.Error("error resetting offsets", "err", err)
-				if errors.Is(err, ErrLaggingBehind) {
-
-					return err
-				}
-
-				waitTries(ctx, backoff(retryCount))
-				continue
-			}
-
-			cl, err = initConsumerGroup(ctx, cfg, onAssigned)
-			if err != nil {
-				return err
-			}
-			<-ready
+		cl, err = initConsumerGroup(ctx, cfg, c.l)
+		if err != nil {
+			return err
 		}
-
-		c.client = cl
-		break
 	}
+
+	c.client = cl
 
 	return nil
 }

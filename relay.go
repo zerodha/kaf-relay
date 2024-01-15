@@ -248,6 +248,8 @@ pollLoop:
 					return err
 				}
 			}
+
+			cl.AllowRebalance()
 		}
 	}
 }

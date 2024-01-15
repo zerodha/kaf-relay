@@ -20,18 +20,13 @@ var (
 	instanceID = "kaf-relay"
 )
 
-// onAssignedCb is a callback function for the consumer group.
-type onAssignedCb func(childCtx context.Context, cl *kgo.Client, claims map[string][]int32)
-
 // getProducerClient returns a kafka producer client.
 func getProducerClient(ctx context.Context, cfg ProducerCfg, bCfg BackoffCfg, l *slog.Logger) (*kgo.Client, error) {
 	opts := []kgo.Opt{
-		kgo.AllowAutoTopicCreation(),
 		kgo.ProduceRequestTimeout(cfg.SessionTimeout),
 		kgo.RecordDeliveryTimeout(cfg.SessionTimeout), // break the :ProduceSync if it takes too long
-		kgo.RequestRetries(cfg.MaxRetries),
 		kgo.ProducerBatchMaxBytes(int32(cfg.MaxMessageBytes)),
-		kgo.MaxBufferedRecords(cfg.BatchSize),
+		kgo.MaxBufferedRecords(cfg.FlushBatchSize),
 		kgo.ProducerLinger(cfg.FlushFrequency),
 		kgo.ProducerBatchCompression(getCompressionCodec(cfg.Compression)),
 		kgo.SeedBrokers(cfg.BootstrapBrokers...),
@@ -138,7 +133,22 @@ func initProducer(ctx context.Context, pCfg ProducerCfg, bCfg BackoffCfg, m *met
 }
 
 // initConsumerGroup initializes a Kafka consumer group.
-func initConsumerGroup(ctx context.Context, cfg ConsumerGroupCfg, onAssigned onAssignedCb) (*kgo.Client, error) {
+func initConsumerGroup(ctx context.Context, cfg ConsumerGroupCfg, l *slog.Logger) (*kgo.Client, error) {
+	assingedCtx, cancelFn := context.WithTimeout(ctx, cfg.SessionTimeout)
+	defer cancelFn()
+
+	onAssigned := func(childCtx context.Context, cl *kgo.Client, claims map[string][]int32) {
+		select {
+		case <-ctx.Done():
+			return
+		case <-childCtx.Done():
+			return
+		default:
+			l.Debug("partition assigned", "broker", cl.OptValue(kgo.SeedBrokers), "claims", claims)
+			cancelFn()
+		}
+	}
+
 	opts := []kgo.Opt{
 		kgo.SeedBrokers(cfg.BootstrapBrokers...),
 		kgo.FetchMaxWait(cfg.MaxWaitTime),
@@ -148,6 +158,7 @@ func initConsumerGroup(ctx context.Context, cfg ConsumerGroupCfg, onAssigned onA
 		kgo.SessionTimeout(cfg.SessionTimeout),
 		kgo.DisableAutoCommit(),
 		kgo.OnPartitionsAssigned(onAssigned),
+		kgo.BlockRebalanceOnPoll(),
 	}
 
 	if cfg.EnableLog {
@@ -181,6 +192,13 @@ func initConsumerGroup(ctx context.Context, cfg ConsumerGroupCfg, onAssigned onA
 	if err := testConnection(cl, cfg.SessionTimeout, cfg.Topics); err != nil {
 		return nil, err
 	}
+
+	l.Debug("waiting till partition assigned", "broker", cl.OptValue(kgo.SeedBrokers))
+	<-assingedCtx.Done()
+	if assingedCtx.Err() == context.DeadlineExceeded {
+		return nil, fmt.Errorf("timeout waiting for partition assingnment; broker %v: %w", cfg.BootstrapBrokers, assingedCtx.Err())
+	}
+	l.Debug("partition assingment done", "broker", cl.OptValue(kgo.SeedBrokers))
 
 	return cl, nil
 }
