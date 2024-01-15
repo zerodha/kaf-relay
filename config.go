@@ -73,6 +73,7 @@ type ConsumerGroupCfg struct {
 	ClientCfg `koanf:",squash"`
 
 	GroupID     string        `koanf:"group_id"`
+	InstanceID  string        `koanf:"instance_id"`
 	MaxWaitTime time.Duration `koanf:"max_wait_time"`
 
 	MaxFailovers int `koanf:"max_failovers"`

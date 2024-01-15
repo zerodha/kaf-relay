@@ -34,6 +34,7 @@ max_wait_time = "10ms"
 offset_commit_interval = "100ms"
 initial_offset = "start"
 group_id = "relay_group1"
+instance_id = "kaf_relay"
 
 max_failovers = -1 # infinite
 
@@ -57,6 +58,7 @@ max_wait_time = "10ms"
 offset_commit_interval = "100ms"
 initial_offset = "start"
 group_id = "relay_group2"
+instance_id = "kaf_relay"
 
 max_failovers = -1 # infinite
 
