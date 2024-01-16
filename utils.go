@@ -185,7 +185,7 @@ func appendSASL(opts []kgo.Opt, cfg ClientCfg) []kgo.Opt {
 // leaveAndResetOffsets leaves the current consumer group and resets its offset if given.
 func leaveAndResetOffsets(ctx context.Context, cl *kgo.Client, cfg ConsumerGroupCfg, offsets map[string]map[int32]kgo.Offset, l *slog.Logger) error {
 	// leave group; mark the group as `Empty` before attempting to reset offsets.
-	l.Debug("leaving group", "group_id", cfg.GroupID)
+	l.Debug("leaving group", "group_id", cfg.GroupID, "instance_id", cfg.InstanceID)
 	if err := leaveGroup(ctx, cl, cfg); err != nil {
 		return err
 	}
@@ -203,12 +203,20 @@ func leaveAndResetOffsets(ctx context.Context, cl *kgo.Client, cfg ConsumerGroup
 
 // leaveGroup leaves the consumer group with our instance id
 func leaveGroup(ctx context.Context, cl *kgo.Client, cfg ConsumerGroupCfg) error {
-	req := kmsg.NewPtrLeaveGroupRequest()
-	req.Group = cfg.GroupID
+	l := kadm.LeaveGroup(cfg.GroupID).
+		Reason("resetting offsets").
+		InstanceIDs(cfg.InstanceID)
 
-	req.Members = []kmsg.LeaveGroupRequestMember{{InstanceID: &instanceID}}
-	_, err := req.RequestWith(ctx, cl)
-	return err
+	resp, err := kadm.NewClient(cl).LeaveGroup(ctx, l)
+	if err != nil {
+		return err
+	}
+
+	if err := resp.Error(); err != nil {
+		return err
+	}
+
+	return nil
 }
 
 // resetOffsets resets the consumer group with the given offsets map.

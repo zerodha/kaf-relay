@@ -9,9 +9,9 @@ import (
 	"time"
 
 	"github.com/VictoriaMetrics/metrics"
-	"github.com/joeirimpan/kaf-relay/filter"
 	"github.com/twmb/franz-go/pkg/kadm"
 	"github.com/twmb/franz-go/pkg/kgo"
+	"github.com/zerodha/kaf-relay/filter"
 )
 
 // relay represents the input, output kafka and the remapping necessary to forward messages from one topic to another.

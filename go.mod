@@ -1,4 +1,4 @@
-module github.com/joeirimpan/kaf-relay
+module github.com/zerodha/kaf-relay
 
 go 1.21
 

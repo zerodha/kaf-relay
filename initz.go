@@ -10,14 +10,9 @@ import (
 	"strings"
 
 	"github.com/VictoriaMetrics/metrics"
-	"github.com/joeirimpan/kaf-relay/filter"
 	"github.com/knadh/koanf/v2"
 	"github.com/twmb/franz-go/pkg/kgo"
-)
-
-var (
-	// instanceID is for the static consumer group memeber.
-	instanceID = "kaf-relay"
+	"github.com/zerodha/kaf-relay/filter"
 )
 
 // getProducerClient returns a kafka producer client.
@@ -154,7 +149,7 @@ func initConsumerGroup(ctx context.Context, cfg ConsumerGroupCfg, l *slog.Logger
 		kgo.FetchMaxWait(cfg.MaxWaitTime),
 		kgo.ConsumeTopics(cfg.Topics...),
 		kgo.ConsumerGroup(cfg.GroupID),
-		kgo.InstanceID(instanceID),
+		kgo.InstanceID(cfg.InstanceID),
 		kgo.SessionTimeout(cfg.SessionTimeout),
 		kgo.DisableAutoCommit(),
 		kgo.OnPartitionsAssigned(onAssigned),
