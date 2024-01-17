@@ -114,8 +114,6 @@ func main() {
 		log.Fatalf("error fetching destination offsets: %v", err)
 	}
 
-	offsetMgr := &offsetManager{Offsets: destOffsets.KOffsets()}
-
 	// setup consumer hook, consumer
 	var n = make([]Node, len(cfg.Consumers))
 	for i := 0; i < len(cfg.Consumers); i++ {
@@ -130,7 +128,7 @@ func main() {
 		cfgs:        cfg.Consumers,
 		maxReqTime:  cfg.App.MaxRequestDuration,
 		backoffCfg:  cfg.App.Backoff,
-		offsetMgr:   offsetMgr,
+		offsets:     destOffsets.KOffsets(),
 		nodeTracker: NewNodeTracker(n),
 		l:           logger,
 	}

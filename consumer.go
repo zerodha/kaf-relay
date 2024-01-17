@@ -22,36 +22,32 @@ type consumer struct {
 	backoffCfg BackoffCfg
 	maxReqTime time.Duration
 
-	offsetMgr   *offsetManager
+	offsets     map[string]map[int32]kgo.Offset
 	nodeTracker *NodeTracker
 
 	l *slog.Logger
 }
 
-// offsetManager is a holder for the topic offsets.
-type offsetManager struct {
-	Offsets map[string]map[int32]kgo.Offset
-}
-
 // Get returns the topic offsets.
 func (c *consumer) GetOffsets() map[string]map[int32]kgo.Offset {
-	return c.offsetMgr.Offsets
+	return c.offsets
 }
 
 // RecordOffsets tracks the offset for this record inmemory.
 func (c *consumer) RecordOffsets(rec *kgo.Record) {
-	oMap := make(map[int32]kgo.Offset)
-	oMap[rec.Partition] = kgo.NewOffset().At(rec.Offset + 1)
-	if c.offsetMgr.Offsets != nil {
-		if o, ok := c.offsetMgr.Offsets[rec.Topic]; ok {
-			o[rec.Partition] = oMap[rec.Partition]
-			c.offsetMgr.Offsets[rec.Topic] = o
-		} else {
-			c.offsetMgr.Offsets[rec.Topic] = oMap
-		}
+	if c.offsets == nil {
+		c.offsets = make(map[string]map[int32]kgo.Offset)
+	}
+
+	if o, ok := c.offsets[rec.Topic]; ok {
+		// If the topic already exists, update the offset for the partition.
+		o[rec.Partition] = kgo.NewOffset().At(rec.Offset + 1)
+		c.offsets[rec.Topic] = o
 	} else {
-		c.offsetMgr.Offsets = make(map[string]map[int32]kgo.Offset)
-		c.offsetMgr.Offsets[rec.Topic] = oMap
+		// If the topic does not exist, create a new map for the topic.
+		o := make(map[int32]kgo.Offset)
+		o[rec.Partition] = kgo.NewOffset().At(rec.Offset + 1)
+		c.offsets[rec.Topic] = o
 	}
 }
 
