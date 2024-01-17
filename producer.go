@@ -227,12 +227,35 @@ retry:
 	return nil
 }
 
-// GetEndOffsets returns the end offsets for the given topics.
-func (p *producer) GetEndOffsets(ctx context.Context, timeout time.Duration) (kadm.ListedOffsets, error) {
-	var destTopics []string
-	for _, p := range p.cfg.Topics {
-		destTopics = append(destTopics, p)
+// getOffsetsForConsumer returns the end offsets for the given topics.
+func (p *producer) getOffsetsForConsumer(ctx context.Context, timeout time.Duration) (kadm.ListedOffsets, error) {
+	var (
+		topics         []string
+		reverseMapping = make(map[string]string, len(p.cfg.Topics))
+	)
+	for c, p := range p.cfg.Topics {
+		topics = append(topics, p)
+		reverseMapping[p] = c
 	}
 
-	return getEndOffsets(ctx, p.client, destTopics, timeout)
+	offsets, err := getEndOffsets(ctx, p.client, topics, timeout)
+	if err != nil {
+		return nil, err
+	}
+
+	// remap destination topic to the consumer topics
+	for t, ps := range offsets {
+		for i, o := range ps {
+			consTopic, ok := reverseMapping[o.Topic]
+			if !ok {
+				continue
+			}
+
+			o.Topic = consTopic
+			ps[i] = o
+		}
+		offsets[t] = ps
+	}
+
+	return offsets, nil
 }

@@ -47,7 +47,6 @@ type relay struct {
 
 	// signal to cancel the poll loop context
 	// use this to track the current node id in track topic lag
-	nodeCh     chan int
 	pollCancel context.CancelFunc
 }
 
