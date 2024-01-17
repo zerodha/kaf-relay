@@ -349,8 +349,9 @@ func waitTries(ctx context.Context, b time.Duration) {
 	}
 }
 
-// thresholdExceeded checks if the difference between the offsets is breaching the threshold
+// thresholdExceeded checks if the difference between the sum of offsets in all topics is breaching the threshold
 func thresholdExceeded(offsetsX, offsetsY kadm.ListedOffsets, max int64) bool {
+	var diff int64
 	for t, po := range offsetsX {
 		for p, x := range po {
 			y, ok := offsetsY.Lookup(t, p)
@@ -358,16 +359,11 @@ func thresholdExceeded(offsetsX, offsetsY kadm.ListedOffsets, max int64) bool {
 				continue
 			}
 
-			// check if the difference is breaching threshold
-			if y.Offset < x.Offset {
-				if (x.Offset - y.Offset) >= max {
-					return true
-				}
-			}
+			diff += (x.Offset - y.Offset)
 		}
 	}
 
-	return false
+	return diff >= max
 }
 
 // isCurrentNode checks if group is active and assigned the topics

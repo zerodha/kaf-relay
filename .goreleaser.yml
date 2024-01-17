@@ -1,22 +1,19 @@
-env:
-  - CGO_ENABLED=1
-
 before:
   hooks:
-  - make dist
-
+    - go mod tidy
+  
 builds:
-  - binary: kaf-relay.bin
-    main: .
+  - env:
+      - CGO_ENABLED=1
+    binary: kaf-relay
     goos:
-      - windows
       - linux
-      - netbsd
     goarch:
       - amd64
 
 archives:
   - format: tar.gz
     files:
+      - config.toml.sample
       - README.md
       - LICENSE
