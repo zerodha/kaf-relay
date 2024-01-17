@@ -13,7 +13,6 @@ builds:
 
 archives:
   - format: tar.gz
-    rlcp: true
     files:
       - config.toml.sample
       - README.md
