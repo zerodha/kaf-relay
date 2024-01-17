@@ -281,17 +281,23 @@ func (r *relay) processMessage(ctx context.Context, rec *kgo.Record) error {
 		return nil
 	}
 
+	// reset &kgo.Record before pushing to producer
+	rec.Headers = nil
+	rec.Timestamp = time.Time{}
+	rec.Topic = t
+	rec.Attrs = kgo.RecordAttrs{}
+	rec.ProducerEpoch = 0
+	rec.ProducerID = 0
+	rec.LeaderEpoch = 0
+	rec.Offset = 0
+	rec.Context = nil
+
 	// queue the message for producing in batch
 	select {
 	case <-ctx.Done():
 		return ctx.Err()
 
-	case r.producer.GetBatchCh() <- &kgo.Record{
-		Key:       rec.Key,
-		Value:     rec.Value,
-		Topic:     t, // remap destination topic
-		Partition: rec.Partition,
-	}:
+	case r.producer.GetBatchCh() <- rec:
 
 		// default:
 		// 	r.logger.Debug("producer batch channel full")
