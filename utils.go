@@ -340,8 +340,14 @@ func retryBackoff(min, max time.Duration) func(int) time.Duration {
 
 // waitTries waits for the timer to hit for the deadline with the backoff duration
 func waitTries(ctx context.Context, b time.Duration) {
+	if b == 0 {
+		return
+	}
+
 	deadline := time.Now().Add(b)
 	after := time.NewTimer(time.Until(deadline))
+	defer after.Stop()
+
 	select {
 	case <-ctx.Done():
 		return

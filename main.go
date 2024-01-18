@@ -82,14 +82,14 @@ func main() {
 	}
 
 	// Assign topic mapping
-	var topics []string
-	for t := range cfg.Topics {
-		topics = append(topics, t)
+	var consumerTopics []string
+	for c := range cfg.Topics {
+		consumerTopics = append(consumerTopics, c)
 	}
 
 	// Set consumer topics
 	for i := 0; i < len(cfg.Consumers); i++ {
-		cfg.Consumers[i].Topics = topics
+		cfg.Consumers[i].Topics = consumerTopics
 	}
 	cfg.Producer.Topics = cfg.Topics
 
@@ -109,14 +109,12 @@ func main() {
 	prod.maxReqTime = cfg.App.MaxRequestDuration
 
 	// setup offsets manager with the destination offsets
-	destOffsets, err := prod.GetEndOffsets(ctx, cfg.App.MaxRequestDuration)
+	destOffsets, err := prod.getOffsetsForConsumer(ctx, cfg.App.MaxRequestDuration)
 	if err != nil {
 		log.Fatalf("error fetching destination offsets: %v", err)
 	}
-	offsetMgr := &offsetManager{Offsets: destOffsets.KOffsets()}
 
 	// setup consumer hook, consumer
-	hookCh := make(chan struct{}, 1)
 	var n = make([]Node, len(cfg.Consumers))
 	for i := 0; i < len(cfg.Consumers); i++ {
 		n[i] = Node{
@@ -130,7 +128,7 @@ func main() {
 		cfgs:        cfg.Consumers,
 		maxReqTime:  cfg.App.MaxRequestDuration,
 		backoffCfg:  cfg.App.Backoff,
-		offsetMgr:   offsetMgr,
+		offsets:     destOffsets.KOffsets(),
 		nodeTracker: NewNodeTracker(n),
 		l:           logger,
 	}
@@ -140,7 +138,7 @@ func main() {
 		consumer: cons,
 		producer: prod,
 
-		unhealthyCh: hookCh,
+		unhealthyCh: make(chan struct{}, 1),
 
 		topics:  cfg.Topics,
 		metrics: metr,
@@ -158,8 +156,6 @@ func main() {
 		destOffsets: destOffsets.KOffsets(),
 
 		filters: filters,
-
-		nodeCh: make(chan int, 1),
 	}
 
 	// Start metrics handler
