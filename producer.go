@@ -46,11 +46,7 @@ func (p *producer) GetBatchCh() chan *kgo.Record {
 // prepareRecord checks if custom topic partition mapping is defined.
 // If required, it updates the records partition
 func (p *producer) prepareRecord(rec *kgo.Record) {
-	if p.cfg.TopicsPartition == nil {
-		return
-	}
-
-	part, ok := p.cfg.TopicsPartition[rec.Topic]
+	part, ok := p.getProducerPartition(rec.Topic, rec.Partition)
 	if ok {
 		rec.Partition = part
 	}
@@ -252,10 +248,53 @@ func (p *producer) getOffsetsForConsumer(ctx context.Context, timeout time.Durat
 			}
 
 			o.Topic = consTopic
+			consPart, ok := p.getConsumerPartition(consTopic, o.Partition)
+			if ok {
+				o.Partition = consPart
+			}
+
 			ps[i] = o
 		}
 		offsets[t] = ps
 	}
 
 	return offsets, nil
+}
+
+func (p *producer) getConsumerPartition(topic string, destPart int32) (int32, bool) {
+	if p.cfg.TopicsPartition == nil {
+		return -1, false
+	}
+
+	parts, ok := p.cfg.TopicsPartition[topic]
+	if !ok {
+		return -1, false
+	}
+
+	for _, p := range parts {
+		if p[1] == destPart {
+			return p[0], true
+		}
+	}
+
+	return -1, false
+}
+
+func (p *producer) getProducerPartition(topic string, srcPart int32) (int32, bool) {
+	if p.cfg.TopicsPartition == nil {
+		return -1, false
+	}
+
+	parts, ok := p.cfg.TopicsPartition[topic]
+	if !ok {
+		return -1, false
+	}
+
+	for _, p := range parts {
+		if p[0] == srcPart {
+			return p[1], true
+		}
+	}
+
+	return -1, false
 }

@@ -83,7 +83,7 @@ outerLoop:
 			}
 
 			// test connectivity and ensures destination topics exists.
-			err = testConnection(cl, cfg.SessionTimeout, topics, cfg.TopicsPartition)
+			err = testConnection(cl, cfg.SessionTimeout, topics, cfg.TopicsPartition, true)
 			if err != nil {
 				l.Error("error connecting to producer", "err", err)
 				retries++
@@ -107,6 +107,15 @@ outerLoop:
 // initProducer initializes the kafka producer client.
 func initProducer(ctx context.Context, pCfg ProducerCfg, bCfg BackoffCfg, m *metrics.Set, l *slog.Logger) (*producer, error) {
 	l.Info("creating producer", "broker", pCfg.BootstrapBrokers)
+	if pCfg.TopicsPartition != nil {
+		for _, pm := range pCfg.TopicsPartition {
+			for _, p := range pm {
+				if len(p) != 2 {
+					return nil, fmt.Errorf("invalid partition mapping (%v)", p)
+				}
+			}
+		}
+	}
 
 	p := &producer{
 		cfg:        pCfg,
@@ -184,7 +193,7 @@ func initConsumerGroup(ctx context.Context, cfg ConsumerGroupCfg, l *slog.Logger
 		return nil, err
 	}
 
-	if err := testConnection(cl, cfg.SessionTimeout, cfg.Topics, nil); err != nil {
+	if err := testConnection(cl, cfg.SessionTimeout, cfg.Topics, nil, false); err != nil {
 		return nil, err
 	}
 
