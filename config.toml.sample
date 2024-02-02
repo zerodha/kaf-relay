@@ -99,9 +99,8 @@ enable_log = false
 
 # Optional configuration to produce to a custom partition for a topic.
 # Default behavior is to producer to same partition as the fetched consumer record.
-# eg: topic -> [[src_partition_1, dest_partition_1], [src_partition_2, dest_partition_2]]
 [producer.partitioning]
-topicA = [[0,1], [1,2]]
+topicA = [{'src' = 0, 'dest'=1}, {'src' = 1, 'dest'=2}]
 
 # Custom go-plugin filter to load to filter messages when relaying
 [filter.testfilter]

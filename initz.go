@@ -107,15 +107,6 @@ outerLoop:
 // initProducer initializes the kafka producer client.
 func initProducer(ctx context.Context, pCfg ProducerCfg, bCfg BackoffCfg, m *metrics.Set, l *slog.Logger) (*producer, error) {
 	l.Info("creating producer", "broker", pCfg.BootstrapBrokers)
-	if pCfg.TopicsPartition != nil {
-		for _, pm := range pCfg.TopicsPartition {
-			for _, p := range pm {
-				if len(p) != 2 {
-					return nil, fmt.Errorf("invalid partition mapping (%v)", p)
-				}
-			}
-		}
-	}
 
 	p := &producer{
 		cfg:        pCfg,

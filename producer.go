@@ -272,8 +272,8 @@ func (p *producer) getConsumerPartition(topic string, destPart int32) (int32, bo
 	}
 
 	for _, p := range parts {
-		if p[1] == destPart {
-			return p[0], true
+		if p.Dest == destPart {
+			return p.Src, true
 		}
 	}
 
@@ -291,8 +291,8 @@ func (p *producer) getProducerPartition(topic string, srcPart int32) (int32, boo
 	}
 
 	for _, p := range parts {
-		if p[0] == srcPart {
-			return p[1], true
+		if p.Src == srcPart {
+			return p.Dest, true
 		}
 	}
 
