@@ -96,9 +96,12 @@ type ProducerCfg struct {
 	BatchSize      int `koanf:"batch_size"`
 	FlushBatchSize int `koanf:"flush_batch_size"`
 	// compression
-	Compression string `koanf:"compression"` // gzip/snappy/lz4/zstd/none
-	// custom partition for topics
-	TopicsPartition map[string]int32 `koanf:"partitioning"`
+	Compression     string                      `koanf:"compression"` // gzip/snappy/lz4/zstd/none
+	TopicsPartition map[string][]TopicPartition `koanf:"partitioning"`
+	Topics          map[string]string
+}
 
-	Topics map[string]string
+type TopicPartition struct {
+	Src  int32 `koanf:"src"`
+	Dest int32 `koanf:"dest"`
 }

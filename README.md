@@ -12,6 +12,8 @@ kaf-relay is an opinionated, high performance program for keeping Kafka clusters
 * Topic lag failover: Monitors offsets amongst N identical nodes to detect lags and to instantly switch upstream consumer nodes.
 * Stop at end: Flag `--stop-at-end` allows the program to stop after reaching the end of consumer topic offsets that was picked up on boot.
 * Filter messages using go plugins: Flag `--filter` allows the program to filter messages based on the logic in plugin code.
+* Custom partition mapping between source and destination nodes: `[producer.partitioning]` allows the program to 
+relay messages from different partitions across source and destination.
 
 #### kaf-relay in different modes
 
