@@ -7,7 +7,7 @@ require (
 	github.com/knadh/koanf/providers/file v0.1.0
 	github.com/knadh/koanf/v2 v2.0.1
 	github.com/spf13/pflag v1.0.5
-	github.com/twmb/franz-go v1.15.4
+	github.com/twmb/franz-go v1.16.0
 	github.com/twmb/franz-go/pkg/kmsg v1.7.0
 )
 
@@ -26,7 +26,7 @@ require (
 
 require (
 	github.com/VictoriaMetrics/metrics v1.23.1
-	github.com/klauspost/compress v1.16.7 // indirect
-	github.com/twmb/franz-go/pkg/kadm v1.8.1
+	github.com/klauspost/compress v1.17.4 // indirect
+	github.com/twmb/franz-go/pkg/kadm v1.11.0
 	golang.org/x/crypto v0.17.0 // indirect
 )
