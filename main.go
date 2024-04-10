@@ -9,12 +9,14 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
 	"github.com/VictoriaMetrics/metrics"
 	"github.com/knadh/koanf/parsers/toml"
 	"github.com/knadh/koanf/providers/file"
+	"github.com/knadh/koanf/providers/posflag"
 	"github.com/knadh/koanf/v2"
 	flag "github.com/spf13/pflag"
 )
@@ -31,37 +33,39 @@ func main() {
 		os.Exit(0)
 	}
 
-	var (
-		configPath  string
-		mode        string
-		stopAtEnd   bool
-		filterPaths []string
-	)
-	f.StringVar(&configPath, "config", "config.toml", "Path to the TOML configuration file")
-	f.StringVar(&mode, "mode", "single", "single/failover")
-	f.BoolVar(&stopAtEnd, "stop-at-end", false, "Stop relay at the end of offsets")
-	f.StringSliceVar(&filterPaths, "filter", []string{}, "Path to filter providers. Can specify multiple values.")
-	f.Bool("version", false, "Current version of the build")
+	f.StringSlice("config", []string{"config.toml"}, "path to one or more config files (will be merged in order)")
+	f.String("mode", "single", "single | failover")
+	f.Bool("stop-at-end", false, "stop relay at the end of offsets")
+	f.StringSlice("filter", []string{}, "path to one or more filter providers")
+	f.StringSlice("topic", []string{}, "one or more source:target topic names. Setting this overrides [topics] in the config file.")
+	f.Bool("version", false, "show current version of the build")
 
 	if err := f.Parse(os.Args[1:]); err != nil {
 		log.Fatalf("error loading flags: %v", err)
 	}
 
+	ko := koanf.New(".")
+	if err := ko.Load(posflag.Provider(f, ".", ko), nil); err != nil {
+		log.Fatalf("error reading flag config: %v", err)
+	}
+
 	// Version flag.
-	if ok, _ := f.GetBool("version"); ok {
+	if ko.Bool("version") {
 		fmt.Println(buildString)
 		os.Exit(0)
 	}
 
-	if stopAtEnd && mode == ModeFailover {
+	if ko.Bool("stop-at-end") && ko.String("mode") == ModeFailover {
 		log.Fatalf("`--stop-at-end` cannot be used with `failover` mode")
 	}
 
-	// Load the config file.
-	ko := koanf.New(".")
-	log.Printf("reading config: %s", configPath)
-	if err := ko.Load(file.Provider(configPath), toml.Parser()); err != nil {
-		log.Fatalf("error reading config: %v", err)
+	// Load one or more config files. Keys in each subsequent file is merged
+	// into the previous file's keys.
+	for _, f := range ko.Strings("config") {
+		log.Printf("reading config from %s", f)
+		if err := ko.Load(file.Provider(f), toml.Parser()); err != nil {
+			log.Fatalf("error reading config: %v", err)
+		}
 	}
 
 	var cfg Config
@@ -69,14 +73,28 @@ func main() {
 		log.Fatalf("error marshalling application config: %v", err)
 	}
 
-	// setup logger
+	// If there are topics in the commandline flags, override the ones read from the file.
+	if topics := ko.Strings("topic"); len(topics) > 0 {
+		mp := map[string]string{}
+		for _, t := range topics {
+			split := strings.Split(t, ":")
+			if len(split) != 2 {
+				log.Fatalf("invalid topic '%s'. Should be in the format 'source:target'", t)
+			}
+
+			mp[split[0]] = split[1]
+		}
+		cfg.Topics = mp
+	}
+
+	// Initialized the structured logger.
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
 		AddSource: false,
 		Level:     cfg.App.LogLevel,
 	}))
 
-	// setup filter providers
-	filters, err := initFilterProviders(filterPaths, ko, logger)
+	// Load the optional filter providers.
+	filters, err := initFilterProviders(ko.Strings("filter"), ko, logger)
 	if err != nil {
 		log.Fatalf("error initializing filter provider: %v", err)
 	}
@@ -153,7 +171,7 @@ func main() {
 		lagThreshold:        cfg.App.LagThreshold,
 		maxReqTime:          cfg.App.MaxRequestDuration,
 
-		stopAtEnd:   stopAtEnd,
+		stopAtEnd:   ko.Bool("stop-at-end"),
 		srcOffsets:  make(map[string]map[int32]int64),
 		destOffsets: destOffsets.KOffsets(),
 
