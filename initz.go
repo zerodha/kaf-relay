@@ -227,7 +227,7 @@ func initFilterProviders(names []string, ko *koanf.Koanf, log *slog.Logger) (map
 	return out, nil
 }
 
-func initMetricsServer(relay *Relay, addr string) http.Server {
+func initMetricsServer(relay *Relay, addr string) *http.Server {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/metrics", func(w http.ResponseWriter, r *http.Request) {
 		buf := new(bytes.Buffer)
@@ -238,7 +238,7 @@ func initMetricsServer(relay *Relay, addr string) http.Server {
 		buf.WriteTo(w)
 	})
 
-	srv := http.Server{
+	srv := &http.Server{
 		Addr:         addr,
 		Handler:      mux,
 		ReadTimeout:  10 * time.Second,

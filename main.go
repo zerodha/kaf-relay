@@ -113,7 +113,9 @@ func main() {
 		log.Fatalf("error starting relay: %v", err)
 	}
 
-	metrics.Shutdown(ctx)
+	if metrics != nil {
+		metrics.Shutdown(ctx)
+	}
 	relay.Close()
 
 	logger.Info("done")
