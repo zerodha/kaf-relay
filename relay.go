@@ -14,8 +14,8 @@ import (
 	"github.com/zerodha/kaf-relay/filter"
 )
 
-// relay represents the input, output kafka and the remapping necessary to forward messages from one topic to another.
-type relay struct {
+// Relay represents the input, output kafka and the remapping necessary to forward messages from one topic to another.
+type Relay struct {
 	consumer *consumer
 	producer *producer
 
@@ -51,12 +51,12 @@ type relay struct {
 }
 
 // getMetrics writes the internal prom metrics to the given io.Writer
-func (r *relay) getMetrics(buf io.Writer) {
+func (r *Relay) getMetrics(buf io.Writer) {
 	r.metrics.WritePrometheus(buf)
 }
 
 // Start starts the consumer loop on kafka (A), fetch messages and relays over to kafka (B) using an async
-func (r *relay) Start(ctx context.Context) error {
+func (r *Relay) Start(ctx context.Context) error {
 	// wait for all goroutines to exit
 	wg := &sync.WaitGroup{}
 	defer wg.Wait()
@@ -108,14 +108,14 @@ func (r *relay) Start(ctx context.Context) error {
 }
 
 // Close close the underlying kgo.Client(s)
-func (r *relay) Close() {
+func (r *Relay) Close() {
 	r.logger.Debug("closing relay consumer, producer...")
 	r.consumer.Close()
 	r.producer.Close()
 }
 
 // startConsumerWorker starts the consumer worker which polls the kafka cluster for messages.
-func (r *relay) startConsumerWorker(ctx context.Context) error {
+func (r *Relay) startConsumerWorker(ctx context.Context) error {
 	backoff := getBackoffFn(r.backoffCfg)
 
 	pollCtx, pollCancelFn := context.WithCancel(context.Background())
@@ -254,7 +254,7 @@ pollLoop:
 }
 
 // processMessage processes the given message and forwards it to the producer batch channel.
-func (r *relay) processMessage(ctx context.Context, rec *kgo.Record) error {
+func (r *Relay) processMessage(ctx context.Context, rec *kgo.Record) error {
 	// Decrement the end offsets for the given topic and partition till we reach 0
 	if r.stopAtEnd {
 		r.decrementSourceOffset(rec.Topic, rec.Partition)
@@ -307,7 +307,7 @@ func (r *relay) processMessage(ctx context.Context, rec *kgo.Record) error {
 }
 
 // trackHealthy tracks the healthy node in the cluster and checks if the lag threshold is exceeded.
-func (r *relay) trackHealthy(ctx context.Context) error {
+func (r *Relay) trackHealthy(ctx context.Context) error {
 	tick := time.NewTicker(r.nodeHealthCheckFreq)
 	defer tick.Stop()
 
@@ -430,7 +430,7 @@ func (r *relay) trackHealthy(ctx context.Context) error {
 }
 
 // decrementSourceOffset decrements the offset count for the given topic and partition in the source offsets map.
-func (r *relay) decrementSourceOffset(topic string, partition int32) {
+func (r *Relay) decrementSourceOffset(topic string, partition int32) {
 	if topicOffsets, ok := r.srcOffsets[topic]; ok {
 		if offset, found := topicOffsets[partition]; found && offset > 0 {
 			topicOffsets[partition]--
@@ -440,7 +440,7 @@ func (r *relay) decrementSourceOffset(topic string, partition int32) {
 }
 
 // setSourceOffsets sets the end offsets of the consumer during bootup to exit on consuming everything.
-func (r *relay) setSourceOffsets(of kadm.ListedOffsets) {
+func (r *Relay) setSourceOffsets(of kadm.ListedOffsets) {
 	of.Each(func(lo kadm.ListedOffset) {
 		ct, ok := r.srcOffsets[lo.Topic]
 		if !ok {

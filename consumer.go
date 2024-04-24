@@ -25,7 +25,7 @@ type consumer struct {
 	offsets     map[string]map[int32]kgo.Offset
 	nodeTracker *NodeTracker
 
-	l *slog.Logger
+	log *slog.Logger
 }
 
 // Get returns the topic offsets.
@@ -70,27 +70,27 @@ func (c *consumer) GetHealthy(ctx context.Context) (int, error) {
 
 // reinit reinitializes the consumer group
 func (c *consumer) Connect(ctx context.Context, cfg ConsumerGroupCfg) error {
-	c.l.Debug("reinitializing consumer group", "broker", cfg.BootstrapBrokers)
+	c.log.Debug("reinitializing consumer group", "broker", cfg.BootstrapBrokers)
 
 	// tcp health check
 	if ok := healthcheck(ctx, cfg.BootstrapBrokers, c.maxReqTime); !ok {
 		return ErrorNoHealthy
 	}
 
-	cl, err := initConsumerGroup(ctx, cfg, c.l)
+	cl, err := initConsumerGroup(ctx, cfg, c.log)
 	if err != nil {
 		return err
 	}
 
 	offsets := c.GetOffsets()
 	if offsets != nil {
-		err = leaveAndResetOffsets(ctx, cl, cfg, offsets, c.l)
+		err = leaveAndResetOffsets(ctx, cl, cfg, offsets, c.log)
 		if err != nil {
-			c.l.Error("error resetting offsets", "err", err)
+			c.log.Error("error resetting offsets", "err", err)
 			return err
 		}
 
-		cl, err = initConsumerGroup(ctx, cfg, c.l)
+		cl, err = initConsumerGroup(ctx, cfg, c.log)
 		if err != nil {
 			return err
 		}

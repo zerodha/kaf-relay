@@ -1,107 +1,91 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"log"
 	"log/slog"
+	"net/http"
 	"os"
 	"path/filepath"
 	"plugin"
 	"strings"
+	"time"
 
 	"github.com/VictoriaMetrics/metrics"
+	"github.com/knadh/koanf/parsers/toml"
+	"github.com/knadh/koanf/providers/file"
+	"github.com/knadh/koanf/providers/posflag"
 	"github.com/knadh/koanf/v2"
+	flag "github.com/spf13/pflag"
 	"github.com/twmb/franz-go/pkg/kgo"
 	"github.com/zerodha/kaf-relay/filter"
 )
 
-// getProducerClient returns a kafka producer client.
-func getProducerClient(ctx context.Context, cfg ProducerCfg, bCfg BackoffCfg, l *slog.Logger) (*kgo.Client, error) {
-	opts := []kgo.Opt{
-		kgo.ProduceRequestTimeout(cfg.SessionTimeout),
-		kgo.RecordDeliveryTimeout(cfg.SessionTimeout), // break the :ProduceSync if it takes too long
-		kgo.ProducerBatchMaxBytes(int32(cfg.MaxMessageBytes)),
-		kgo.MaxBufferedRecords(cfg.FlushBatchSize),
-		kgo.ProducerLinger(cfg.FlushFrequency),
-		kgo.ProducerBatchCompression(getCompressionCodec(cfg.Compression)),
-		kgo.SeedBrokers(cfg.BootstrapBrokers...),
-		kgo.RequiredAcks(getAckPolicy(cfg.CommitAck)),
+func initConfig() (*koanf.Koanf, Config) {
+	// Initialize config
+	f := flag.NewFlagSet("config", flag.ContinueOnError)
+	f.Usage = func() {
+		fmt.Println(f.FlagUsages())
+		os.Exit(0)
 	}
 
-	// TCPAck/LeaderAck requires kafka deduplication to be turned off
-	if !cfg.EnableIdempotency {
-		opts = append(opts, kgo.DisableIdempotentWrite())
+	f.StringSlice("config", []string{"config.toml"}, "path to one or more config files (will be merged in order)")
+	f.String("mode", "single", "single | failover")
+	f.Bool("stop-at-end", false, "stop relay at the end of offsets")
+	f.StringSlice("filter", []string{}, "path to one or more filter providers")
+	f.StringSlice("topic", []string{}, "one or more source:target topic names. Setting this overrides [topics] in the config file.")
+	f.Bool("version", false, "show current version of the build")
+
+	if err := f.Parse(os.Args[1:]); err != nil {
+		log.Fatalf("error loading flags: %v", err)
 	}
 
-	opts = append(opts, kgo.RecordPartitioner(kgo.ManualPartitioner()))
-
-	// Add authentication
-	if cfg.EnableAuth {
-		opts = appendSASL(opts, cfg.ClientCfg)
+	ko := koanf.New(".")
+	if err := ko.Load(posflag.Provider(f, ".", ko), nil); err != nil {
+		log.Fatalf("error reading flag config: %v", err)
 	}
 
-	if cfg.EnableTLS {
-		if cfg.CACertPath == "" && cfg.ClientCertPath == "" && cfg.ClientKeyPath == "" {
-			opts = append(opts, kgo.DialTLS())
-		} else {
-			tlsOpt, err := createTLSConfig(cfg.CACertPath, cfg.ClientCertPath, cfg.ClientKeyPath)
-			if err != nil {
-				return nil, err
-			}
+	// Version flag.
+	if ko.Bool("version") {
+		fmt.Println(buildString)
+		os.Exit(0)
+	}
 
-			// Set up TLS configuration
-			opts = append(opts, tlsOpt)
+	if ko.Bool("stop-at-end") && ko.String("mode") == ModeFailover {
+		log.Fatalf("`--stop-at-end` cannot be used with `failover` mode")
+	}
+
+	// Load one or more config files. Keys in each subsequent file is merged
+	// into the previous file's keys.
+	for _, f := range ko.Strings("config") {
+		log.Printf("reading config from %s", f)
+		if err := ko.Load(file.Provider(f), toml.Parser()); err != nil {
+			log.Fatalf("error reading config: %v", err)
 		}
 	}
 
-	var (
-		retries = 0
-		backoff = getBackoffFn(bCfg)
-		err     error
-		cl      *kgo.Client
-	)
+	var cfg Config
+	if err := ko.Unmarshal("", &cfg); err != nil {
+		log.Fatalf("error marshalling application config: %v", err)
+	}
 
-	// retry until we can connect to kafka
-outerLoop:
-	for retries < cfg.MaxRetries || cfg.MaxRetries == IndefiniteRetry {
-		select {
-		case <-ctx.Done():
-			break outerLoop
-		default:
-			cl, err = kgo.NewClient(opts...)
-			if err != nil {
-				l.Error("error creating producer client", "err", err)
-				retries++
-				waitTries(ctx, backoff(retries))
-				continue
+	// If there are topics in the commandline flags, override the ones read from the file.
+	if topics := ko.Strings("topic"); len(topics) > 0 {
+		mp := map[string]string{}
+		for _, t := range topics {
+			split := strings.Split(t, ":")
+			if len(split) != 2 {
+				log.Fatalf("invalid topic '%s'. Should be in the format 'source:target'", t)
 			}
 
-			// Get the destination topics
-			var topics []string
-			for _, v := range cfg.Topics {
-				topics = append(topics, v)
-			}
-
-			// test connectivity and ensures destination topics exists.
-			err = testConnection(cl, cfg.SessionTimeout, topics, cfg.TopicsPartition, true)
-			if err != nil {
-				l.Error("error connecting to producer", "err", err)
-				retries++
-				waitTries(ctx, backoff(retries))
-				continue
-			}
-
-			if err == nil {
-				break outerLoop
-			}
+			mp[split[0]] = split[1]
 		}
+		cfg.Topics = mp
 	}
 
-	if err != nil {
-		return nil, err
-	}
-
-	return cl, nil
+	return ko, cfg
 }
 
 // initProducer initializes the kafka producer client.
@@ -160,7 +144,6 @@ func initConsumerGroup(ctx context.Context, cfg ConsumerGroupCfg, l *slog.Logger
 		opts = append(opts, kgo.WithLogger(kgo.BasicLogger(os.Stdout, kgo.LogLevelDebug, nil)))
 	}
 
-	// Add authentication
 	if cfg.EnableAuth {
 		opts = appendSASL(opts, cfg.ClientCfg)
 	}
@@ -244,7 +227,123 @@ func initFilterProviders(names []string, ko *koanf.Koanf, log *slog.Logger) (map
 	return out, nil
 }
 
-// getClient returns franz-go client with default config
+func initMetricsServer(relay *Relay, addr string) http.Server {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/metrics", func(w http.ResponseWriter, r *http.Request) {
+		buf := new(bytes.Buffer)
+		relay.getMetrics(buf)
+
+		w.Header().Set("Content-Type", "text/plain")
+		w.WriteHeader(http.StatusOK)
+		buf.WriteTo(w)
+	})
+
+	srv := http.Server{
+		Addr:         addr,
+		Handler:      mux,
+		ReadTimeout:  10 * time.Second,
+		WriteTimeout: 10 * time.Second,
+	}
+
+	go func() {
+		err := srv.ListenAndServe()
+		if err != nil && err != http.ErrServerClosed {
+			log.Printf("error starting server: %v", err)
+		}
+	}()
+
+	return srv
+}
+
+// getProducerClient returns a Kafka producer client.
+func getProducerClient(ctx context.Context, cfg ProducerCfg, bCfg BackoffCfg, l *slog.Logger) (*kgo.Client, error) {
+	opts := []kgo.Opt{
+		kgo.ProduceRequestTimeout(cfg.SessionTimeout),
+		kgo.RecordDeliveryTimeout(cfg.SessionTimeout), // break the :ProduceSync if it takes too long
+		kgo.ProducerBatchMaxBytes(int32(cfg.MaxMessageBytes)),
+		kgo.MaxBufferedRecords(cfg.FlushBatchSize),
+		kgo.ProducerLinger(cfg.FlushFrequency),
+		kgo.ProducerBatchCompression(getCompressionCodec(cfg.Compression)),
+		kgo.SeedBrokers(cfg.BootstrapBrokers...),
+		kgo.RequiredAcks(getAckPolicy(cfg.CommitAck)),
+	}
+
+	// TCPAck/LeaderAck requires Kafka deduplication to be turned off.
+	if !cfg.EnableIdempotency {
+		opts = append(opts, kgo.DisableIdempotentWrite())
+	}
+
+	opts = append(opts, kgo.RecordPartitioner(kgo.ManualPartitioner()))
+
+	if cfg.EnableAuth {
+		opts = appendSASL(opts, cfg.ClientCfg)
+	}
+
+	if cfg.EnableTLS {
+		if cfg.CACertPath == "" && cfg.ClientCertPath == "" && cfg.ClientKeyPath == "" {
+			opts = append(opts, kgo.DialTLS())
+		} else {
+			tlsOpt, err := createTLSConfig(cfg.CACertPath, cfg.ClientCertPath, cfg.ClientKeyPath)
+			if err != nil {
+				return nil, err
+			}
+
+			// Set up TLS configuration
+			opts = append(opts, tlsOpt)
+		}
+	}
+
+	var (
+		retries = 0
+		backoff = getBackoffFn(bCfg)
+		err     error
+		cl      *kgo.Client
+	)
+
+	// Retry until a successful connection.
+outerLoop:
+	for retries < cfg.MaxRetries || cfg.MaxRetries == IndefiniteRetry {
+		select {
+		case <-ctx.Done():
+			break outerLoop
+		default:
+			cl, err = kgo.NewClient(opts...)
+			if err != nil {
+				l.Error("error creating producer client", "err", err)
+				retries++
+				waitTries(ctx, backoff(retries))
+				continue
+			}
+
+			// Get the destination topics
+			var topics []string
+			for _, v := range cfg.Topics {
+				topics = append(topics, v)
+			}
+
+			// Test connectivity and ensure destination topics exists.
+			err = testConnection(cl, cfg.SessionTimeout, topics, cfg.TopicsPartition, true)
+			if err != nil {
+				l.Error("error connecting to producer", "err", err)
+				retries++
+				waitTries(ctx, backoff(retries))
+				continue
+			}
+
+			if err == nil {
+				break outerLoop
+			}
+		}
+	}
+
+	if err != nil {
+		return nil, err
+	}
+
+	return cl, nil
+}
+
+// getClient returns franz-go client with default config.
 func getClient(cfg ConsumerGroupCfg) (*kgo.Client, error) {
 	opts := []kgo.Opt{
 		kgo.SeedBrokers(cfg.BootstrapBrokers...),
@@ -256,7 +355,6 @@ func getClient(cfg ConsumerGroupCfg) (*kgo.Client, error) {
 		opts = append(opts, kgo.WithLogger(kgo.BasicLogger(os.Stdout, kgo.LogLevelDebug, nil)))
 	}
 
-	// Add authentication
 	if cfg.EnableAuth {
 		opts = appendSASL(opts, cfg.ClientCfg)
 	}

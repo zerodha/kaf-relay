@@ -4,12 +4,14 @@ before:
   
 builds:
   - env:
-      - CGO_ENABLED=1
+      - CGO_ENABLED=0
     binary: kaf-relay
     goos:
       - linux
     goarch:
       - amd64
+    ldflags:
+      - -s -w -X "main.buildString={{ .Tag }} ({{ .ShortCommit }} {{ .Date }})" -X "main.versionString={{ .Tag }}"
 
 archives:
   - format: tar.gz
