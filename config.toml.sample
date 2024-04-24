@@ -33,7 +33,9 @@ max_wait_time = "10ms"
 # To not commit offsets, set this to 0.
 offset_commit_interval = "100ms"
 initial_offset = "start"
+# consumer group id
 group_id = "relay_group1"
+# static memmbership to pin the member for the consumer group for respawn / reconnect and fence other members from connecting using the same id.
 instance_id = "kaf_relay"
 
 max_failovers = -1 # infinite
@@ -57,7 +59,9 @@ max_wait_time = "10ms"
 # To not commit offsets, set this to 0.
 offset_commit_interval = "100ms"
 initial_offset = "start"
+# consumer group id
 group_id = "relay_group2"
+# static memmbership to pin the member for the consumer group for respawn / reconnect and fence other members from connecting using the same id.
 instance_id = "kaf_relay"
 
 max_failovers = -1 # infinite
