@@ -13,25 +13,30 @@ const (
 
 // Config is a holder struct for all configs.
 type Config struct {
-	App AppCfg `koanf:"app"`
+	App struct {
+		LogLevel            slog.Level    `koanf:"log_level"`
+		MaxFailovers        int           `koanf:"max_failovers"`
+		MaxRequestDuration  time.Duration `koanf:"max_request_duration"`
+		MetricsServerAddr   string        `koanf:"metrics_server_addr"`
+		LagThreshold        int64         `koanf:"lag_threshold"`
+		NodeHealthCheckFreq time.Duration `koanf:"node_health_check_frequency"`
+		Backoff             BackoffCfg    `koanf:"retry_backoff"`
+	} `koanf:"app"`
 
-	Consumers []ConsumerGroupCfg `koanf:"consumers"`
-	Producer  ProducerCfg        `koanf:"producer"`
-	Topics    map[string]string  `koanf:"topics"`
+	Sources   []ConsumerGroupCfg `koanf:"sources"`
+	Target    ProducerCfg        `koanf:"target"`
+	TopicsMap map[string]string  `koanf:"topics"`
+
+	// source_topic:TopicConfig map.
+	// This is post-processed and derived from the simple string TopicsMap.
+	Topics map[string]Topic `koanf:"-"`
 }
 
-// AppCfg is other miscellaneous app configs.
-type AppCfg struct {
-	MaxFailovers       int           `koanf:"max_failovers"`
-	MaxRequestDuration time.Duration `koanf:"max_request_duration"`
-
-	LogLevel          slog.Level `koanf:"log_level"`
-	MetricsServerAddr string     `koanf:"metrics_server_addr"`
-
-	LagThreshold        int64         `koanf:"lag_threshold"`
-	NodeHealthCheckFreq time.Duration `koanf:"node_health_check_frequency"`
-
-	Backoff BackoffCfg `koanf:"retry_backoff"`
+type Topic struct {
+	SourceTopic         string
+	TargetTopic         string
+	TargetPartition     uint
+	AutoTargetPartition bool
 }
 
 // BackoffCfg is the retry backoff config.
@@ -84,21 +89,12 @@ type ConsumerGroupCfg struct {
 type ProducerCfg struct {
 	ClientCfg `koanf:",squash"`
 
-	// disabling idempotent produce requests allows TCPAck/LeaderAck
-	EnableIdempotency bool `koanf:"enable_idempotency"`
-	// required acks
-	CommitAck      string        `koanf:"commit_ack_type"` // tcp/leader/cluster/default
-	MaxRetries     int           `koanf:"max_retries"`
-	FlushFrequency time.Duration `koanf:"flush_frequency"`
-	// Upper bound of max message bytes to produce
-	MaxMessageBytes int `koanf:"max_message_bytes"`
-	// Buffer produce messages
-	BatchSize      int `koanf:"batch_size"`
-	FlushBatchSize int `koanf:"flush_batch_size"`
-	// compression
-	Compression string `koanf:"compression"` // gzip/snappy/lz4/zstd/none
-	// custom partition for topics
-	TopicsPartition map[string]int32 `koanf:"partitioning"`
-
-	Topics map[string]string
+	EnableIdempotency bool          `koanf:"enable_idempotency"`
+	CommitAck         string        `koanf:"commit_ack_type"` // tcp|leader|cluster|default
+	MaxRetries        int           `koanf:"max_retries"`
+	FlushFrequency    time.Duration `koanf:"flush_frequency"`
+	MaxMessageBytes   int           `koanf:"max_message_bytes"`
+	BatchSize         int           `koanf:"batch_size"`
+	FlushBatchSize    int           `koanf:"flush_batch_size"`
+	Compression       string        `koanf:"compression"` // gzip|snappy|lz4|zstd|none
 }

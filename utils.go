@@ -73,7 +73,7 @@ func getAckPolicy(ack string) kgo.Acks {
 }
 
 // testConnection tests if the connection is active or not; Also confirms the existence of topics
-func testConnection(client *kgo.Client, timeout time.Duration, topics []string, topicP map[string]int32) error {
+func testConnection(client *kgo.Client, timeout time.Duration, topics []string, partitions map[string]uint) error {
 	if timeout == 0 {
 		timeout = 15 * time.Second
 	}
@@ -103,18 +103,18 @@ func testConnection(client *kgo.Client, timeout time.Duration, topics []string, 
 			return err
 		}
 
-		if topicP == nil {
+		if partitions == nil {
 			continue
 		}
 
-		p, ok := topicP[*topic.Topic]
+		p, ok := partitions[*topic.Topic]
 		if !ok {
 			continue
 		}
 
 		found := false
 		for _, t := range topic.Partitions {
-			if t.Partition == p {
+			if uint(t.Partition) == p {
 				found = true
 				break
 			}

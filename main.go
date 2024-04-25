@@ -30,17 +30,17 @@ func main() {
 		log.Fatalf("error initializing filter provider: %v", err)
 	}
 
-	// Set source consumer topics.
+	// Set source topics on consumers.
 	var srcTopics []string
-	for t := range cfg.Topics {
-		srcTopics = append(srcTopics, t)
+	for _, t := range cfg.Topics {
+		srcTopics = append(srcTopics, t.SourceTopic)
 	}
-	for i := 0; i < len(cfg.Consumers); i++ {
-		cfg.Consumers[i].Topics = srcTopics
+	for i := 0; i < len(cfg.Sources); i++ {
+		cfg.Sources[i].Topics = srcTopics
 	}
 
 	// Set src:target topic map on the producer.
-	cfg.Producer.Topics = cfg.Topics
+	// cfg.Target.targetTopics = cfg.Topics
 
 	// Create context with interrupts signals.
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -50,14 +50,14 @@ func main() {
 	metr := metrics.NewSet()
 
 	// Initialize the producer.
-	prod, err := initProducer(ctx, cfg.Producer, cfg.App.Backoff, metr, logger)
+	prod, err := initProducer(ctx, cfg.Topics, cfg.Target, cfg.App.Backoff, metr, logger)
 	if err != nil {
 		log.Fatalf("error starting producer: %v", err)
 	}
 	prod.maxReqTime = cfg.App.MaxRequestDuration
 
 	// Setup offsets manager with the destination offsets.
-	destOffsets, err := prod.GetEndOffsets(ctx, cfg.App.MaxRequestDuration)
+	destOffsets, err := prod.GetTargetOffsets(ctx, cfg.App.MaxRequestDuration)
 	if err != nil {
 		log.Fatalf("error fetching destination offsets: %v", err)
 	}
@@ -65,8 +65,8 @@ func main() {
 
 	// Initialize the consumers.
 	hookCh := make(chan struct{}, 1)
-	var n = make([]Node, len(cfg.Consumers))
-	for i := 0; i < len(cfg.Consumers); i++ {
+	var n = make([]Node, len(cfg.Sources))
+	for i := 0; i < len(cfg.Sources); i++ {
 		n[i] = Node{
 			Weight: -1,
 			ID:     i,
@@ -77,19 +77,19 @@ func main() {
 	relay := &Relay{
 		consumer: &consumer{
 			client:      nil, // init during track healthy
-			cfgs:        cfg.Consumers,
+			cfgs:        cfg.Sources,
 			maxReqTime:  cfg.App.MaxRequestDuration,
 			backoffCfg:  cfg.App.Backoff,
 			offsetMgr:   offsetMgr,
 			nodeTracker: NewNodeTracker(n),
-			log:           logger,
+			log:         logger,
 		},
 
 		producer: prod,
 
 		unhealthyCh: hookCh,
 
-		topics:  cfg.Topics,
+		topics:  cfg.TopicsMap,
 		metrics: metr,
 		logger:  logger,
 

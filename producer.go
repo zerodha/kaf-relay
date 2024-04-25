@@ -18,6 +18,12 @@ type producer struct {
 	backoffCfg BackoffCfg
 	maxReqTime time.Duration
 
+	// Map of optional destination topic partitions.
+	topicPartitions map[string]int32
+
+	// Map of target topics and their config.
+	targetTopics map[string]Topic
+
 	batchCh chan *kgo.Record
 	batch   []*kgo.Record
 
@@ -46,12 +52,7 @@ func (p *producer) GetBatchCh() chan *kgo.Record {
 // prepareRecord checks if custom topic partition mapping is defined.
 // If required, it updates the records partition
 func (p *producer) prepareRecord(rec *kgo.Record) {
-	if p.cfg.TopicsPartition == nil {
-		return
-	}
-
-	part, ok := p.cfg.TopicsPartition[rec.Topic]
-	if ok {
+	if part, ok := p.topicPartitions[rec.Topic]; ok {
 		rec.Partition = part
 	}
 }
@@ -180,7 +181,7 @@ retry:
 
 			var (
 				srcTopic  = res.Record.Topic
-				destTopic = p.cfg.Topics[res.Record.Topic]
+				destTopic = p.targetTopics[res.Record.Topic]
 				part      = res.Record.Partition
 			)
 			p.metrics.GetOrCreateCounter(fmt.Sprintf(RelayMetric, srcTopic, destTopic, part)).Inc()
@@ -227,12 +228,12 @@ retry:
 	return nil
 }
 
-// GetEndOffsets returns the end offsets for the given topics.
-func (p *producer) GetEndOffsets(ctx context.Context, timeout time.Duration) (kadm.ListedOffsets, error) {
-	var destTopics []string
-	for _, p := range p.cfg.Topics {
-		destTopics = append(destTopics, p)
+// GetTargetOffsets returns the offsets on the target topics.
+func (p *producer) GetTargetOffsets(ctx context.Context, timeout time.Duration) (kadm.ListedOffsets, error) {
+	var out []string
+	for _, t := range p.targetTopics {
+		out = append(out, t.TargetTopic)
 	}
 
-	return getEndOffsets(ctx, p.client, destTopics, timeout)
+	return getEndOffsets(ctx, p.client, out, timeout)
 }

@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"plugin"
+	"strconv"
 	"strings"
 	"time"
 
@@ -71,25 +72,79 @@ func initConfig() (*koanf.Koanf, Config) {
 		log.Fatalf("error marshalling application config: %v", err)
 	}
 
-	// If there are topics in the commandline flags, override the ones read from the file.
-	if topics := ko.Strings("topic"); len(topics) > 0 {
-		mp := map[string]string{}
-		for _, t := range topics {
-			split := strings.Split(t, ":")
-			if len(split) != 2 {
-				log.Fatalf("invalid topic '%s'. Should be in the format 'source:target'", t)
-			}
-
-			mp[split[0]] = split[1]
-		}
-		cfg.Topics = mp
-	}
+	cfg.Topics = initTopicsMap(cfg.TopicsMap, ko)
 
 	return ko, cfg
 }
 
+// initTopicsMap parses the topic map from the [[topics]] config in
+// the config file and --topic cli flag.
+func initTopicsMap(mp map[string]string, ko *koanf.Koanf) map[string]Topic {
+	out := map[string]Topic{}
+	for src, target := range mp {
+		var (
+			autoPartition = true
+			partition     int
+		)
+
+		// The target topic value is in the format topic:parititon.
+		if split := strings.Split(target, ":"); len(split) == 2 {
+			target = split[0]
+			autoPartition = false
+
+			p, err := strconv.Atoi(split[1])
+			if err != nil {
+				log.Fatalf("invalid topic:partition config in '%s'", target)
+			}
+
+			partition = p
+		}
+
+		out[src] = Topic{
+			SourceTopic:         src,
+			TargetTopic:         target,
+			TargetPartition:     uint(partition),
+			AutoTargetPartition: autoPartition,
+		}
+	}
+
+	// If there are topicNames in the commandline flags, override the ones read from the file.
+	if topicNames := ko.Strings("topic"); len(topicNames) > 0 {
+		for _, t := range topicNames {
+			var topic Topic
+
+			split := strings.Split(t, ":")
+			if len(split) == 2 {
+				topic.SourceTopic = split[0]
+				topic.TargetTopic = split[1]
+				topic.AutoTargetPartition = true
+			} else if len(split) == 3 {
+				topic.SourceTopic = split[0]
+				topic.TargetTopic = split[1]
+				topic.AutoTargetPartition = false
+
+				p, err := strconv.Atoi(split[2])
+				if err != nil {
+					log.Fatalf("invalid topic:partition config in '%s'", t)
+				}
+				topic.TargetPartition = uint(p)
+			} else {
+				log.Fatalf("invalid topic '%s'. Should be in the format 'source:target' or 'source:target:partition'", t)
+			}
+
+			out[topic.SourceTopic] = topic
+		}
+	}
+
+	if len(out) == 0 {
+		log.Fatalf("no topic map specified")
+	}
+
+	return out
+}
+
 // initProducer initializes the kafka producer client.
-func initProducer(ctx context.Context, pCfg ProducerCfg, bCfg BackoffCfg, m *metrics.Set, l *slog.Logger) (*producer, error) {
+func initProducer(ctx context.Context, top map[string]Topic, pCfg ProducerCfg, bCfg BackoffCfg, m *metrics.Set, l *slog.Logger) (*producer, error) {
 	l.Info("creating producer", "broker", pCfg.BootstrapBrokers)
 
 	p := &producer{
@@ -101,7 +156,7 @@ func initProducer(ctx context.Context, pCfg ProducerCfg, bCfg BackoffCfg, m *met
 		//batchCh:    make(chan *kgo.Record, pCfg.BatchSize),
 		batchCh: make(chan *kgo.Record),
 	}
-	cl, err := getProducerClient(ctx, pCfg, bCfg, l)
+	cl, err := getProducerClient(ctx, top, pCfg, bCfg, l)
 	if err != nil {
 		return nil, err
 	}
@@ -256,7 +311,7 @@ func initMetricsServer(relay *Relay, addr string) http.Server {
 }
 
 // getProducerClient returns a Kafka producer client.
-func getProducerClient(ctx context.Context, cfg ProducerCfg, bCfg BackoffCfg, l *slog.Logger) (*kgo.Client, error) {
+func getProducerClient(ctx context.Context, top map[string]Topic, cfg ProducerCfg, bCfg BackoffCfg, l *slog.Logger) (*kgo.Client, error) {
 	opts := []kgo.Opt{
 		kgo.ProduceRequestTimeout(cfg.SessionTimeout),
 		kgo.RecordDeliveryTimeout(cfg.SessionTimeout), // break the :ProduceSync if it takes too long
@@ -315,14 +370,20 @@ outerLoop:
 				continue
 			}
 
-			// Get the destination topics
-			var topics []string
-			for _, v := range cfg.Topics {
-				topics = append(topics, v)
+			// Get the target (producer) topics.
+			var (
+				topics     []string
+				partitions = map[string]uint{}
+			)
+			for _, t := range top {
+				topics = append(topics, t.TargetTopic)
+				if !t.AutoTargetPartition {
+					partitions[t.TargetTopic] = t.TargetPartition
+				}
 			}
 
 			// Test connectivity and ensure destination topics exists.
-			err = testConnection(cl, cfg.SessionTimeout, topics, cfg.TopicsPartition)
+			err = testConnection(cl, cfg.SessionTimeout, topics, partitions)
 			if err != nil {
 				l.Error("error connecting to producer", "err", err)
 				retries++
