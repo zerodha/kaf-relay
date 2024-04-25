@@ -10,7 +10,7 @@ BIN := kaf-relay
 .PHONY: build
 build: $(BIN)
 
-$(BIN):
+$(BIN): $(shell find . -type f -name "*.go") go.mod go.sum
 	CGO_ENABLED=0 go build -o ${BIN} --ldflags="-X 'main.buildString=${BUILDSTR}'"
 
 .PHONY: clean
