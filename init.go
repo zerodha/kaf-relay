@@ -89,7 +89,7 @@ func initSourcePoolConfig(ko *koanf.Koanf) relay.SourcePoolCfg {
 		ReqTimeout:          ko.MustDuration("source_pool.request_timeout"),
 		LagThreshold:        ko.MustInt64("source_pool.offset_lag_threshold"),
 		MaxRetries:          ko.MustInt("source_pool.max_retries"),
-		EnableBackoff:       ko.Bool("source_pool._backoff_enable"),
+		EnableBackoff:       ko.Bool("source_pool.backoff_enable"),
 		BackoffMin:          ko.MustDuration("source_pool.backoff_min"),
 		BackoffMax:          ko.MustDuration("source_pool.backoff_max"),
 		GroupID:             ko.MustString("source_pool.group_id"),
@@ -175,7 +175,7 @@ func initTopicsMap(ko *koanf.Koanf) map[string]relay.Topic {
 }
 
 // initKafkaConfig reads the source(s)/target Kafka configuration.
-func initKafkaConfig(ko *koanf.Koanf) ([]relay.ConsumerGroupCfg, relay.ProducerCfg) {
+func initKafkaConfig(ko *koanf.Koanf, topics map[string]relay.Topic) ([]relay.ConsumerGroupCfg, relay.ProducerCfg) {
 	// Read source Kafka config.
 	src := struct {
 		Sources []relay.ConsumerGroupCfg `koanf:"sources"`
@@ -189,6 +189,16 @@ func initKafkaConfig(ko *koanf.Koanf) ([]relay.ConsumerGroupCfg, relay.ProducerC
 	var prod relay.ProducerCfg
 	if err := ko.Unmarshal("target", &prod); err != nil {
 		log.Fatalf("error unmarshalling `sources` config: %v", err)
+	}
+
+	// Pass all the source topics into cg config
+	var srcs = make([]string, 0, len(topics))
+	for _, t := range topics {
+		srcs = append(srcs, t.SourceTopic)
+	}
+
+	for i := range src.Sources {
+		src.Sources[i].Topics = srcs
 	}
 
 	return src.Sources, prod

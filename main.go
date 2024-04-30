@@ -50,7 +50,7 @@ func main() {
 	topics := initTopicsMap(ko)
 
 	// Initialize the source and target Kafka config.
-	consumerCfgs, prodConfig := initKafkaConfig(ko)
+	consumerCfgs, prodConfig := initKafkaConfig(ko, topics)
 
 	// Initialize the target Kafka (producer) relay.
 	target, err := relay.NewTarget(globalCtx, initTargetConfig(ko), prodConfig, topics, metr, lo)
@@ -58,8 +58,13 @@ func main() {
 		log.Fatalf("error initializing target controller: %v", err)
 	}
 
+	hOf, err := target.GetHighWatermark()
+	if err != nil {
+		log.Fatalf("error getting destination high watermark: %v", err)
+	}
+
 	// Initialize the source Kafka (consumer) relay.
-	srcPool, err := relay.NewSourcePool(initSourcePoolConfig(ko), consumerCfgs, topics, lo)
+	srcPool, err := relay.NewSourcePool(initSourcePoolConfig(ko), consumerCfgs, hOf.KOffsets(), topics, lo)
 	if err != nil {
 		log.Fatalf("error initializing source pool controller: %v", err)
 	}

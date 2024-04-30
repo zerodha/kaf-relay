@@ -163,6 +163,7 @@ loop:
 					continue
 				}
 
+				re.log.Info("poll loop got new healthy node", "node_id", s.ID, "brokers", s.Config.BootstrapBrokers)
 				server = s
 				break
 			}
