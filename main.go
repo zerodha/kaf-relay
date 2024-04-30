@@ -50,7 +50,7 @@ func main() {
 	topics := initTopicsMap(ko)
 
 	// Initialize the source and target Kafka config.
-	consumerCfgs, prodConfig := initKafkaConfig(ko, topics)
+	consumerCfgs, prodConfig := initKafkaConfig(ko)
 
 	// Initialize the target Kafka (producer) relay.
 	target, err := relay.NewTarget(globalCtx, initTargetConfig(ko), prodConfig, topics, metr, lo)

@@ -175,7 +175,7 @@ func initTopicsMap(ko *koanf.Koanf) map[string]relay.Topic {
 }
 
 // initKafkaConfig reads the source(s)/target Kafka configuration.
-func initKafkaConfig(ko *koanf.Koanf, topics map[string]relay.Topic) ([]relay.ConsumerGroupCfg, relay.ProducerCfg) {
+func initKafkaConfig(ko *koanf.Koanf) ([]relay.ConsumerGroupCfg, relay.ProducerCfg) {
 	// Read source Kafka config.
 	src := struct {
 		Sources []relay.ConsumerGroupCfg `koanf:"sources"`
@@ -189,16 +189,6 @@ func initKafkaConfig(ko *koanf.Koanf, topics map[string]relay.Topic) ([]relay.Co
 	var prod relay.ProducerCfg
 	if err := ko.Unmarshal("target", &prod); err != nil {
 		log.Fatalf("error unmarshalling `sources` config: %v", err)
-	}
-
-	// Pass all the source topics into cg config
-	var srcs = make([]string, 0, len(topics))
-	for _, t := range topics {
-		srcs = append(srcs, t.SourceTopic)
-	}
-
-	for i := range src.Sources {
-		src.Sources[i].Topics = srcs
 	}
 
 	return src.Sources, prod

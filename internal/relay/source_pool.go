@@ -376,7 +376,7 @@ func (sp *SourcePool) initConsumerGroup(ctx context.Context, cfg ConsumerGroupCf
 	opts := []kgo.Opt{
 		kgo.SeedBrokers(cfg.BootstrapBrokers...),
 		kgo.FetchMaxWait(sp.cfg.ReqTimeout),
-		kgo.ConsumeTopics(cfg.Topics...),
+		kgo.ConsumeTopics(sp.cfg.Topics...),
 		kgo.ConsumerGroup(sp.cfg.GroupID),
 		kgo.InstanceID(sp.cfg.InstanceID),
 		kgo.SessionTimeout(cfg.SessionTimeout),
@@ -412,7 +412,7 @@ func (sp *SourcePool) initConsumerGroup(ctx context.Context, cfg ConsumerGroupCf
 		return nil, err
 	}
 
-	if err := testConnection(cl, cfg.SessionTimeout, cfg.Topics, nil); err != nil {
+	if err := testConnection(cl, cfg.SessionTimeout, sp.cfg.Topics, nil); err != nil {
 		return nil, err
 	}
 
@@ -546,7 +546,7 @@ waitForTopicLag:
 			}
 
 			// Get end offsets of the topics
-			topicOffsets, err := admCl.ListEndOffsets(ctx, s.Config.Topics...)
+			topicOffsets, err := admCl.ListEndOffsets(ctx, sp.cfg.Topics...)
 			if err != nil {
 				sp.log.Error("error fetching offsets", "err", err)
 				return err
