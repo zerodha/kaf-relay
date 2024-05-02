@@ -89,7 +89,7 @@ func initSourcePoolConfig(ko *koanf.Koanf) relay.SourcePoolCfg {
 		ReqTimeout:          ko.MustDuration("source_pool.request_timeout"),
 		LagThreshold:        ko.MustInt64("source_pool.offset_lag_threshold"),
 		MaxRetries:          ko.MustInt("source_pool.max_retries"),
-		EnableBackoff:       ko.Bool("source_pool._backoff_enable"),
+		EnableBackoff:       ko.Bool("source_pool.backoff_enable"),
 		BackoffMin:          ko.MustDuration("source_pool.backoff_min"),
 		BackoffMax:          ko.MustDuration("source_pool.backoff_max"),
 		GroupID:             ko.MustString("source_pool.group_id"),

@@ -42,8 +42,6 @@ type KafkaCfg struct {
 // ConsumerGroupCfg is the consumer group specific config.
 type ConsumerGroupCfg struct {
 	KafkaCfg `koanf:",squash"`
-
-	Topics []string
 }
 
 // ProducerCfg is the Kafka producer config.

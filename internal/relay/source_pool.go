@@ -24,6 +24,7 @@ type SourcePoolCfg struct {
 
 	GroupID    string
 	InstanceID string
+	Topics     []string
 }
 
 // Server represents a source Server's config with health and weight
@@ -36,6 +37,8 @@ type Server struct {
 	// on a source. This is used for comparing lags between different sources
 	// based on a threshold. If a server is unhealthy, the weight is marked as -1.
 	Weight int64
+
+	Healthy bool
 
 	// This is only set when a new live Kafka consumer connection is established
 	// on demand via Get(), where a server{} is returned. Internally, no connections
@@ -50,7 +53,6 @@ type SourcePool struct {
 	client *kgo.Client
 	log    *slog.Logger
 
-	topics  []string
 	offsets map[string]map[int32]kgo.Offset
 
 	// List of all source servers.
@@ -82,31 +84,47 @@ var (
 // servers. The pool always attempts to find one healthy node for the relay to consume from.
 func NewSourcePool(cfg SourcePoolCfg, serverCfgs []ConsumerGroupCfg, topics map[string]Topic, log *slog.Logger) (*SourcePool, error) {
 	servers := make([]Server, 0, len(serverCfgs))
+	// Initially mark all nodes as unhealthy
 	for n, c := range serverCfgs {
 		servers = append(servers, Server{
-			ID:     n,
-			Weight: -1,
-			Config: c,
+			ID:      n,
+			Weight:  unhealthyWeight,
+			Healthy: false,
+			Config:  c,
 		})
 	}
 
-	topicNames := make([]string, 0, len(topics))
-	for _, t := range topicNames {
-		topicNames = append(topicNames, t)
+	cfg.Topics = make([]string, 0, len(topics))
+	for t := range topics {
+		cfg.Topics = append(cfg.Topics, t)
 	}
 
 	return &SourcePool{
-		cfg:     cfg,
-		servers: servers,
-		topics:  topicNames,
-
-		// Set the "healthiest" node as the first node. This will fail as the program
-		// boots until the health tracker updates weights to indicate a real healthy
-		// node at which point the pool can return a real healthy node.
-		curCandidate: servers[0],
-		backoffFn:    getBackoffFn(cfg.EnableBackoff, cfg.BackoffMin, cfg.BackoffMax),
-		log:          log,
+		cfg:       cfg,
+		servers:   servers,
+		log:       log,
+		backoffFn: getBackoffFn(cfg.EnableBackoff, cfg.BackoffMin, cfg.BackoffMax),
 	}, nil
+}
+
+func (sp *SourcePool) SetInitialOffsets(of map[string]map[int32]kgo.Offset) {
+	// Assign the current weight as initial target offset.
+	// This is done to resume if target already has messages published from src.
+	var w int64
+	for _, p := range of {
+		for _, o := range p {
+			w += o.EpochOffset().Offset
+		}
+	}
+
+	sp.offsets = of
+	// Set the current candidate with initial weight and a placeholder ID. This initial
+	// weight ensures we resume consuming from where last left off. A real
+	// healthy node should replace this via background checks
+	sp.curCandidate = Server{
+		Healthy: false,
+		Weight:  w,
+	}
 }
 
 // Get attempts return a healthy source Kafka client connection.
@@ -115,44 +133,49 @@ func NewSourcePool(cfg SourcePoolCfg, serverCfgs []ConsumerGroupCfg, topics map[
 func (sp *SourcePool) Get(globalCtx context.Context) (*Server, error) {
 	retries := 0
 	for {
-		if sp.cfg.MaxRetries != IndefiniteRetry && retries >= sp.cfg.MaxRetries {
-			return nil, fmt.Errorf("`max_retries`(%d) exhausted; exiting relay", sp.cfg.MaxRetries)
-		}
-
-		// Get the config for a healthy node.
-		if s, err := sp.getCurCandidate(); err == nil {
-			sp.log.Debug("attempting new source connection", "id", s.ID, "broker", s.Config.BootstrapBrokers, "retries", retries)
-			conn, err := sp.newConn(globalCtx, s)
-			if err != nil {
-				retries++
-				sp.log.Error("new source connection failed", "id", s.ID, "broker", s.Config.BootstrapBrokers, "error", err, "retries", retries)
-				waitTries(globalCtx, sp.backoffFn(retries))
+		select {
+		case <-globalCtx.Done():
+			return nil, globalCtx.Err()
+		default:
+			if sp.cfg.MaxRetries != IndefiniteRetry && retries >= sp.cfg.MaxRetries {
+				return nil, fmt.Errorf("`max_retries`(%d) exhausted; exiting relay", sp.cfg.MaxRetries)
 			}
 
-			// Cache the current live connection internally.
-			sp.client = conn
+			// Get the config for a healthy node.
+			if s, err := sp.getCurCandidate(); err == nil {
+				sp.log.Debug("attempting new source connection", "id", s.ID, "broker", s.Config.BootstrapBrokers, "retries", retries)
+				conn, err := sp.newConn(globalCtx, s)
+				if err != nil {
+					retries++
+					sp.log.Error("new source connection failed", "id", s.ID, "broker", s.Config.BootstrapBrokers, "error", err, "retries", retries)
+					waitTries(globalCtx, sp.backoffFn(retries))
+				}
 
-			out := s
-			out.Client = conn
+				// Cache the current live connection internally.
+				sp.client = conn
 
-			sp.fetchCtx, sp.fetchCancel = context.WithCancel(context.Background())
-			return &out, nil
+				out := s
+				out.Client = conn
+
+				sp.fetchCtx, sp.fetchCancel = context.WithCancel(globalCtx)
+				return &out, nil
+			}
+
+			retries++
+			sp.log.Error("no healthy server found. waiting and retrying", "retries", retries)
+			waitTries(globalCtx, sp.backoffFn(retries))
 		}
-
-		retries++
-		sp.log.Error("no healthy server found. waiting and retrying", "retries", retries)
-		waitTries(globalCtx, sp.backoffFn(retries))
 	}
 }
 
 // GetFetches retrieves a Kafka fetch iterator to retrieve individual messages from.
 func (sp *SourcePool) GetFetches(s *Server) (kgo.Fetches, error) {
-	sp.log.Debug("rerieving fetches from source", "id", s.ID, "broker", s.Config.BootstrapBrokers)
+	sp.log.Debug("retrieving fetches from source", "id", s.ID, "broker", s.Config.BootstrapBrokers)
 	fetches := s.Client.PollFetches(sp.fetchCtx)
 
 	// There's no connection.
 	if fetches.IsClientClosed() {
-		sp.log.Debug("rerieving fetches failed. client closed.", "id", s.ID, "broker", s.Config.BootstrapBrokers)
+		sp.log.Debug("retrieving fetches failed. client closed.", "id", s.ID, "broker", s.Config.BootstrapBrokers)
 		sp.setWeight(s.ID, unhealthyWeight)
 
 		return nil, errors.New("fetch failed")
@@ -188,7 +211,7 @@ func (sp *SourcePool) RecordOffsets(rec *kgo.Record) {
 }
 
 func (sp *SourcePool) GetHighWatermark(ctx context.Context, cl *kgo.Client) (kadm.ListedOffsets, error) {
-	return getHighWatermark(ctx, cl, sp.topics, sp.cfg.ReqTimeout)
+	return getHighWatermark(ctx, cl, sp.cfg.Topics, sp.cfg.ReqTimeout)
 }
 
 // Close closes the active source Kafka client.
@@ -214,7 +237,7 @@ func (sp *SourcePool) newConn(ctx context.Context, s Server) (*kgo.Client, error
 	}
 
 	if sp.offsets != nil {
-		sp.log.Debug("resetting cached offsets", "id", s.ID, "server", s.Config.BootstrapBrokers)
+		sp.log.Debug("resetting cached offsets", "id", s.ID, "server", s.Config.BootstrapBrokers, "offsets", sp.offsets)
 		if err := sp.leaveAndResetOffsets(ctx, cl, s); err != nil {
 			sp.log.Error("error resetting cached offsets", "id", s.ID, "server", s.Config.BootstrapBrokers, "error", err)
 			return nil, err
@@ -241,9 +264,7 @@ func (sp *SourcePool) healthcheck(ctx context.Context, signal chan struct{}) err
 	// of servers don't have to be locked.
 	sp.Lock()
 	servers := make([]Server, 0, len(sp.servers))
-	for _, s := range sp.servers {
-		servers = append(servers, s)
-	}
+	servers = append(servers, sp.servers...)
 	sp.Unlock()
 
 	clients := make([]*kgo.Client, len(servers))
@@ -355,7 +376,7 @@ func (sp *SourcePool) initConsumerGroup(ctx context.Context, cfg ConsumerGroupCf
 	opts := []kgo.Opt{
 		kgo.SeedBrokers(cfg.BootstrapBrokers...),
 		kgo.FetchMaxWait(sp.cfg.ReqTimeout),
-		kgo.ConsumeTopics(cfg.Topics...),
+		kgo.ConsumeTopics(sp.cfg.Topics...),
 		kgo.ConsumerGroup(sp.cfg.GroupID),
 		kgo.InstanceID(sp.cfg.InstanceID),
 		kgo.SessionTimeout(cfg.SessionTimeout),
@@ -391,7 +412,7 @@ func (sp *SourcePool) initConsumerGroup(ctx context.Context, cfg ConsumerGroupCf
 		return nil, err
 	}
 
-	if err := testConnection(cl, cfg.SessionTimeout, cfg.Topics, nil); err != nil {
+	if err := testConnection(cl, cfg.SessionTimeout, sp.cfg.Topics, nil); err != nil {
 		return nil, err
 	}
 
@@ -451,7 +472,7 @@ func (sp *SourcePool) getCurCandidate() (Server, error) {
 
 	// If the weight (sum of all high watermarks of all topics on the source) is -1,
 	// the server is unhealthy.
-	if sp.curCandidate.Weight == -1 {
+	if sp.curCandidate.Weight == unhealthyWeight || !sp.curCandidate.Healthy {
 		return sp.curCandidate, ErrorNoHealthy
 	}
 
@@ -470,6 +491,9 @@ func (sp *SourcePool) setWeight(id int, weight int64) {
 		}
 
 		s.Weight = weight
+		if s.Weight != unhealthyWeight {
+			s.Healthy = true
+		}
 
 		// If the incoming server's weight is greater than the current candidate,
 		// promote that to the current candidate.
@@ -522,7 +546,7 @@ waitForTopicLag:
 			}
 
 			// Get end offsets of the topics
-			topicOffsets, err := admCl.ListEndOffsets(ctx, s.Config.Topics...)
+			topicOffsets, err := admCl.ListEndOffsets(ctx, sp.cfg.Topics...)
 			if err != nil {
 				sp.log.Error("error fetching offsets", "err", err)
 				return err
