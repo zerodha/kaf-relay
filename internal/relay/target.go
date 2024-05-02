@@ -278,7 +278,7 @@ retry:
 		batchLen := len(tg.batch)
 
 		// check if the destination cluster is healthy before attempting to produce again.
-		if retries > 0 && !checkTCP(ctx, tg.pCfg.BootstrapBrokers, tg.cfg.ReqTimeout) {
+		if retries > 0 && !checkTCP(ctx, tg.pCfg.BootstrapBrokers, tg.pCfg.SessionTimeout) {
 			continue
 		}
 

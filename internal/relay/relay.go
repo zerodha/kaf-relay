@@ -41,12 +41,12 @@ type Relay struct {
 func NewRelay(cfg RelayCfg, src *SourcePool, target *Target, topics Topics, filters map[string]filter.Provider, log *slog.Logger) (*Relay, error) {
 	// If stop-at-end is set, fetch and cache the offsets to determine
 	// when end is reached.
-	var offsets kadm.ListedOffsets
+	var offsets map[string]map[int32]kgo.Offset
 	if cfg.StopAtEnd {
 		if o, err := target.GetHighWatermark(); err != nil {
 			return nil, err
 		} else {
-			offsets = o
+			offsets = o.KOffsets()
 		}
 	}
 
@@ -60,7 +60,7 @@ func NewRelay(cfg RelayCfg, src *SourcePool, target *Target, topics Topics, filt
 		signalCh: make(chan struct{}, 1),
 
 		srcOffsets:    make(map[string]map[int32]int64),
-		targetOffsets: offsets.KOffsets(),
+		targetOffsets: offsets,
 		filters:       filters,
 	}
 
@@ -90,7 +90,7 @@ func (re *Relay) Start(globalCtx context.Context) error {
 		}
 	}()
 
-	// start producer worker
+	// Start the target / producer controller.
 	wg.Add(1)
 	re.log.Info("starting producer worker")
 	go func() {
@@ -104,10 +104,9 @@ func (re *Relay) Start(globalCtx context.Context) error {
 		}
 	}()
 
-	// Start consumer group
+	// Start the consumer group worker by trigger a signal to the relay loop to fetch
+	// a consumer worker to fetch initial healthy node.
 	re.log.Info("starting consumer worker")
-
-	// Trigger consumer to fetch initial healthy node.
 	re.signalCh <- struct{}{}
 
 	// Start the indefinite poll that asks for new connections
@@ -163,7 +162,7 @@ loop:
 					continue
 				}
 
-				re.log.Info("poll loop got new healthy node", "node_id", s.ID, "brokers", s.Config.BootstrapBrokers)
+				re.log.Info("poll loop got new healthy node", "id", s.ID, "server", s.Config.BootstrapBrokers)
 				server = s
 				break
 			}
@@ -223,28 +222,29 @@ func (re *Relay) processMessage(ctx context.Context, rec *kgo.Record) error {
 		re.decrementSourceOffset(rec.Topic, rec.Partition)
 	}
 
-	// check if message needs to skipped?
-	msgAllowed := true
-	for n, f := range re.filters {
-		if !f.IsAllowed(rec.Value) {
-			re.log.Debug("filtering message", "message", string(rec.Value), "filter", n)
-			msgAllowed = false
-			break
+	// If there are filters, run the message through them to decide whether
+	// the message has to be skipped or written to the target.
+	if re.filters != nil {
+		ok := true
+		for n, f := range re.filters {
+			if !f.IsAllowed(rec.Value) {
+				re.log.Debug("filtering message", "message", string(rec.Value), "filter", n)
+				ok = false
+				break
+			}
+		}
+
+		if !ok {
+			return nil
 		}
 	}
 
-	// skip message
-	if !msgAllowed {
-		return nil
-	}
-
-	// Fetch destination topic. Ignore if remapping is not defined.
 	t, ok := re.topics[rec.Topic]
 	if !ok {
 		return nil
 	}
 
-	// queue the message for producing in batch
+	// Queue the message for writing to target.
 	select {
 	case <-ctx.Done():
 		return ctx.Err()
@@ -252,12 +252,9 @@ func (re *Relay) processMessage(ctx context.Context, rec *kgo.Record) error {
 	case re.target.GetBatchCh() <- &kgo.Record{
 		Key:       rec.Key,
 		Value:     rec.Value,
-		Topic:     t.TargetTopic, // remap destination topic
+		Topic:     t.TargetTopic,
 		Partition: rec.Partition,
 	}:
-
-		// default:
-		// 	r.logger.Debug("producer batch channel full")
 	}
 
 	return nil
@@ -265,10 +262,10 @@ func (re *Relay) processMessage(ctx context.Context, rec *kgo.Record) error {
 
 // decrementSourceOffset decrements the offset count for the given topic and partition in the source offsets map.
 func (re *Relay) decrementSourceOffset(topic string, partition int32) {
-	if topicOffsets, ok := re.srcOffsets[topic]; ok {
-		if offset, found := topicOffsets[partition]; found && offset > 0 {
-			topicOffsets[partition]--
-			re.srcOffsets[topic] = topicOffsets
+	if o, ok := re.srcOffsets[topic]; ok {
+		if offset, found := o[partition]; found && offset > 0 {
+			o[partition]--
+			re.srcOffsets[topic] = o
 		}
 	}
 }
@@ -284,7 +281,7 @@ func (re *Relay) cacheSrcOffsets(of kadm.ListedOffsets) {
 		re.srcOffsets[lo.Topic] = ct
 	})
 
-	// read till destination offset; reduce that.
+	// Read till the destination offsets and reduce it from the target weight.
 	for t, po := range re.targetOffsets {
 		for p, o := range po {
 			if ct, ok := re.srcOffsets[t]; ok {
@@ -296,7 +293,7 @@ func (re *Relay) cacheSrcOffsets(of kadm.ListedOffsets) {
 	}
 }
 
-// hasReachedEnd reports if there is any pending messages in given topic-partition
+// hasReachedEnd reports if there is any pending messages in given topic-partition.
 func (re *Relay) hasReachedEnd() bool {
 	for _, p := range re.srcOffsets {
 		for _, o := range p {

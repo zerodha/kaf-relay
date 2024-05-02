@@ -226,9 +226,9 @@ func retryBackoff(min, max time.Duration) func(int) time.Duration {
 	}
 }
 
-// waitTries waits for the timer to hit for the deadline with the backoff duration
-func waitTries(ctx context.Context, b time.Duration) {
-	deadline := time.Now().Add(b)
+// waitTries waits for the timer to hit for the deadline with the backoff duration.
+func waitTries(ctx context.Context, waitDuration time.Duration) {
+	deadline := time.Now().Add(waitDuration)
 	after := time.NewTimer(time.Until(deadline))
 	select {
 	case <-ctx.Done():
@@ -237,7 +237,7 @@ func waitTries(ctx context.Context, b time.Duration) {
 	}
 }
 
-// checkNetErr checks if the given error is a network error or not
+// checkNetErr checks if the given error is a network error.
 func checkNetErr(err error) bool {
 	if netError, ok := err.(net.Error); ok && netError.Timeout() {
 		return true

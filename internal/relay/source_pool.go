@@ -24,7 +24,6 @@ type SourcePoolCfg struct {
 
 	GroupID    string
 	InstanceID string
-	Topics     []string
 }
 
 // Server represents a source Server's config with health and weight
@@ -52,6 +51,7 @@ type SourcePool struct {
 	cfg    SourcePoolCfg
 	client *kgo.Client
 	log    *slog.Logger
+	topics []string
 
 	offsets map[string]map[int32]kgo.Offset
 
@@ -95,13 +95,14 @@ func NewSourcePool(cfg SourcePoolCfg, serverCfgs []ConsumerGroupCfg, topics Topi
 		})
 	}
 
-	cfg.Topics = make([]string, 0, len(topics))
+	topicNames := make([]string, 0, len(topics))
 	for t := range topics {
-		cfg.Topics = append(cfg.Topics, t)
+		topicNames = append(topicNames, t)
 	}
 
 	return &SourcePool{
 		cfg:       cfg,
+		topics:    topicNames,
 		servers:   servers,
 		log:       log,
 		backoffFn: getBackoffFn(cfg.EnableBackoff, cfg.BackoffMin, cfg.BackoffMax),
@@ -121,6 +122,7 @@ func (sp *SourcePool) SetInitialOffsets(of map[string]map[int32]kgo.Offset) {
 	}
 
 	sp.offsets = of
+
 	// Set the current candidate with initial weight and a placeholder ID. This initial
 	// weight ensures we resume consuming from where last left off. A real
 	// healthy node should replace this via background checks
@@ -214,7 +216,7 @@ func (sp *SourcePool) RecordOffsets(rec *kgo.Record) {
 }
 
 func (sp *SourcePool) GetHighWatermark(ctx context.Context, cl *kgo.Client) (kadm.ListedOffsets, error) {
-	return getHighWatermark(ctx, cl, sp.cfg.Topics, sp.cfg.ReqTimeout)
+	return getHighWatermark(ctx, cl, sp.topics, sp.cfg.ReqTimeout)
 }
 
 // Close closes the active source Kafka client.
@@ -228,7 +230,7 @@ func (sp *SourcePool) Close() {
 // newConn initializes a new consumer group config.
 func (sp *SourcePool) newConn(ctx context.Context, s Server) (*kgo.Client, error) {
 	sp.log.Debug("running TCP health check", "id", s.ID, "server", s.Config.BootstrapBrokers)
-	if ok := checkTCP(ctx, s.Config.BootstrapBrokers, sp.cfg.ReqTimeout); !ok {
+	if ok := checkTCP(ctx, s.Config.BootstrapBrokers, s.Config.SessionTimeout); !ok {
 		return nil, ErrorNoHealthy
 	}
 
@@ -379,7 +381,7 @@ func (sp *SourcePool) initConsumerGroup(ctx context.Context, cfg ConsumerGroupCf
 	opts := []kgo.Opt{
 		kgo.SeedBrokers(cfg.BootstrapBrokers...),
 		kgo.FetchMaxWait(sp.cfg.ReqTimeout),
-		kgo.ConsumeTopics(sp.cfg.Topics...),
+		kgo.ConsumeTopics(sp.topics...),
 		kgo.ConsumerGroup(sp.cfg.GroupID),
 		kgo.InstanceID(sp.cfg.InstanceID),
 		kgo.SessionTimeout(cfg.SessionTimeout),
@@ -415,7 +417,7 @@ func (sp *SourcePool) initConsumerGroup(ctx context.Context, cfg ConsumerGroupCf
 		return nil, err
 	}
 
-	if err := testConnection(cl, cfg.SessionTimeout, sp.cfg.Topics, nil); err != nil {
+	if err := testConnection(cl, cfg.SessionTimeout, sp.topics, nil); err != nil {
 		return nil, err
 	}
 
@@ -549,7 +551,7 @@ waitForTopicLag:
 			}
 
 			// Get end offsets of the topics
-			topicOffsets, err := admCl.ListEndOffsets(ctx, sp.cfg.Topics...)
+			topicOffsets, err := admCl.ListEndOffsets(ctx, sp.topics...)
 			if err != nil {
 				sp.log.Error("error fetching offsets", "err", err)
 				return err
@@ -607,7 +609,7 @@ waitForTopicLag:
 	return nil
 }
 
-// leaveGroup leaves the consumer group with our instance id
+// leaveGroup makes the given client leave from a consumer group.
 func (sp *SourcePool) leaveGroup(ctx context.Context, cl *kgo.Client) error {
 	l := kadm.LeaveGroup(sp.cfg.GroupID).Reason("resetting offsets").InstanceIDs(sp.cfg.InstanceID)
 
