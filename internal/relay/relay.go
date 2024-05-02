@@ -21,7 +21,7 @@ type Relay struct {
 	target *Target
 	log    *slog.Logger
 
-	topics map[string]Topic
+	topics Topics
 
 	// signalCh is used to signal when the relay poll loop should look for a new healthy server.
 	signalCh chan struct{}
@@ -38,7 +38,7 @@ type Relay struct {
 	filters map[string]filter.Provider
 }
 
-func NewRelay(cfg RelayCfg, src *SourcePool, target *Target, topics map[string]Topic, filters map[string]filter.Provider, log *slog.Logger) (*Relay, error) {
+func NewRelay(cfg RelayCfg, src *SourcePool, target *Target, topics Topics, filters map[string]filter.Provider, log *slog.Logger) (*Relay, error) {
 	// If stop-at-end is set, fetch and cache the offsets to determine
 	// when end is reached.
 	var offsets kadm.ListedOffsets

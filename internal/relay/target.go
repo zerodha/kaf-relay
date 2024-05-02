@@ -32,14 +32,14 @@ type Target struct {
 	topicPartitions map[string]int32
 
 	// Map of target topics and their config.
-	targetTopics map[string]Topic
+	targetTopics Topics
 
 	batchCh chan *kgo.Record
 	batch   []*kgo.Record
 }
 
 // NewTarget returns a new producer relay that handles target Kafka instances.
-func NewTarget(globalCtx context.Context, cfg TargetCfg, pCfg ProducerCfg, topics map[string]Topic, m *metrics.Set, log *slog.Logger) (*Target, error) {
+func NewTarget(globalCtx context.Context, cfg TargetCfg, pCfg ProducerCfg, topics Topics, m *metrics.Set, log *slog.Logger) (*Target, error) {
 	p := &Target{
 		cfg:     cfg,
 		pCfg:    pCfg,
@@ -152,7 +152,7 @@ func (tg *Target) GetHighWatermark() (kadm.ListedOffsets, error) {
 }
 
 // initProducer returns a Kafka producer client.
-func (tg *Target) initProducer(top map[string]Topic) (*kgo.Client, error) {
+func (tg *Target) initProducer(top Topics) (*kgo.Client, error) {
 	opts := []kgo.Opt{
 		kgo.ProduceRequestTimeout(tg.pCfg.SessionTimeout),
 		kgo.RecordDeliveryTimeout(tg.pCfg.SessionTimeout), // break the :ProduceSync if it takes too long

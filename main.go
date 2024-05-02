@@ -46,11 +46,11 @@ func main() {
 	globalCtx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
-	// Initialize the source:target topic map from config.
-	topics := initTopicsMap(ko)
-
 	// Initialize the source and target Kafka config.
 	consumerCfgs, prodConfig := initKafkaConfig(ko)
+
+	// Initialize the source:target topic map from config.
+	topics := initTopicsMap(ko)
 
 	// Initialize the target Kafka (producer) relay.
 	target, err := relay.NewTarget(globalCtx, initTargetConfig(ko), prodConfig, topics, metr, lo)

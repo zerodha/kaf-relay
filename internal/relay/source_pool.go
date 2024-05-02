@@ -82,9 +82,10 @@ var (
 
 // NewSourcePool returns a controller instance that manages the lifecycle of a pool of N source (consumer)
 // servers. The pool always attempts to find one healthy node for the relay to consume from.
-func NewSourcePool(cfg SourcePoolCfg, serverCfgs []ConsumerGroupCfg, topics map[string]Topic, log *slog.Logger) (*SourcePool, error) {
+func NewSourcePool(cfg SourcePoolCfg, serverCfgs []ConsumerGroupCfg, topics Topics, log *slog.Logger) (*SourcePool, error) {
 	servers := make([]Server, 0, len(serverCfgs))
-	// Initially mark all nodes as unhealthy
+
+	// Initially mark all servers as unhealthy.
 	for n, c := range serverCfgs {
 		servers = append(servers, Server{
 			ID:      n,
@@ -107,6 +108,8 @@ func NewSourcePool(cfg SourcePoolCfg, serverCfgs []ConsumerGroupCfg, topics map[
 	}, nil
 }
 
+// SetInitialOffsets sets the offset/weight from the target on boot so that the messages
+// can be consumed from the offsets where they were left off.
 func (sp *SourcePool) SetInitialOffsets(of map[string]map[int32]kgo.Offset) {
 	// Assign the current weight as initial target offset.
 	// This is done to resume if target already has messages published from src.

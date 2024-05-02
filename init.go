@@ -105,13 +105,13 @@ func initRelayConfig(ko *koanf.Koanf) relay.RelayCfg {
 
 // initTopicsMap parses the topic map from the [[topics]] config in
 // the config file and --topic cli flag.
-func initTopicsMap(ko *koanf.Koanf) map[string]relay.Topic {
+func initTopicsMap(ko *koanf.Koanf) relay.Topics {
 	var mp map[string]string
 	if err := ko.Unmarshal("topics", &mp); err != nil {
 		log.Fatalf("error marshalling `topics` config: %v", err)
 	}
 
-	out := map[string]relay.Topic{}
+	out := relay.Topics{}
 	for src, target := range mp {
 		var (
 			autoPartition = true

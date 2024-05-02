@@ -12,6 +12,9 @@ type Topic struct {
 	AutoTargetPartition bool
 }
 
+// Topics is an abstraction over source->target topic map.
+type Topics map[string]Topic
+
 // KafkaCfg is the message broker's client config.
 type KafkaCfg struct {
 	// Namespace
