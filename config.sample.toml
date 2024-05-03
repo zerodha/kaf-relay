@@ -1,5 +1,4 @@
 [app]
-max_failovers = -1 # infinite
 log_level = "debug"
 metrics_server_addr = ":7081"
 
