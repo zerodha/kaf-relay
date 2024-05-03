@@ -8,7 +8,6 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
-	"path/filepath"
 	"plugin"
 	"strconv"
 	"strings"
@@ -196,13 +195,21 @@ func initKafkaConfig(ko *koanf.Koanf) ([]relay.ConsumerGroupCfg, relay.ProducerC
 
 // initFilters loads the go plugin, initializes it and return a map of filter plugins.
 func initFilters(ko *koanf.Koanf, lo *slog.Logger) (map[string]filter.Provider, error) {
+	if ko.String("mode") != "single" {
+		log.Fatalf("filters can only be used in `single` mode.")
+	}
+
 	out := make(map[string]filter.Provider)
-	for _, name := range ko.MapKeys("filters") {
-		plg, err := plugin.Open(name)
-		if err != nil {
-			return nil, fmt.Errorf("error loading provider plugin '%s': %v", name, err)
+	for _, id := range ko.MapKeys("filters") {
+		if !ko.Bool("filters." + id + ".enabled") {
+			continue
 		}
-		id := strings.TrimSuffix(filepath.Base(name), filepath.Ext(name))
+
+		path := ko.String("filters." + id + ".path")
+		plg, err := plugin.Open(path)
+		if err != nil {
+			return nil, fmt.Errorf("error loading provider plugin '%s': %s: %v", id, path, err)
+		}
 
 		newFunc, err := plg.Lookup("New")
 		if err != nil {
@@ -215,7 +222,7 @@ func initFilters(ko *koanf.Koanf, lo *slog.Logger) (map[string]filter.Provider, 
 
 		var cfg filter.Config
 		if err := ko.Unmarshal("filter."+id, &cfg); err != nil {
-			log.Fatalf("error unmarshalling filter config: %s: %v", name, err)
+			log.Fatalf("error unmarshalling filter config: %s: %v", id, err)
 		}
 		if cfg.Config == "" {
 			lo.Info(fmt.Sprintf("WARNING: No config 'filter.%s' for '%s' in config", id, id))
@@ -226,7 +233,7 @@ func initFilters(ko *koanf.Koanf, lo *slog.Logger) (map[string]filter.Provider, 
 		if err != nil {
 			return nil, fmt.Errorf("error initializing filter provider plugin '%s': %v", id, err)
 		}
-		lo.Info(fmt.Sprintf("loaded filter provider plugin '%s' from %s", id, name))
+		lo.Info(fmt.Sprintf("loaded filter provider plugin '%s' from %s", id, id))
 
 		p, ok := prov.(filter.Provider)
 		if !ok {

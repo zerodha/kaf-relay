@@ -117,6 +117,8 @@ request_timeout = "100ms"
 
 # Custom go-plugin filter to load to filter messages when relaying
 [filters.test]
+enabled = false
+path = "test.bin"
 config = '''
 {
     "address": ["127.0.0.1:6379"],
