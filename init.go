@@ -194,15 +194,15 @@ func initKafkaConfig(ko *koanf.Koanf) ([]relay.ConsumerGroupCfg, relay.ProducerC
 	return src.Sources, prod
 }
 
-// initFilterProviders loads the go plugin, initializes it and return a map of filter plugins.
-func initFilterProviders(names []string, ko *koanf.Koanf, log *slog.Logger) (map[string]filter.Provider, error) {
+// initFilters loads the go plugin, initializes it and return a map of filter plugins.
+func initFilters(ko *koanf.Koanf, lo *slog.Logger) (map[string]filter.Provider, error) {
 	out := make(map[string]filter.Provider)
-	for _, fName := range names {
-		plg, err := plugin.Open(fName)
+	for _, name := range ko.MapKeys("filters") {
+		plg, err := plugin.Open(name)
 		if err != nil {
-			return nil, fmt.Errorf("error loading provider plugin '%s': %v", fName, err)
+			return nil, fmt.Errorf("error loading provider plugin '%s': %v", name, err)
 		}
-		id := strings.TrimSuffix(filepath.Base(fName), filepath.Ext(fName))
+		id := strings.TrimSuffix(filepath.Base(name), filepath.Ext(name))
 
 		newFunc, err := plg.Lookup("New")
 		if err != nil {
@@ -214,9 +214,11 @@ func initFilterProviders(names []string, ko *koanf.Koanf, log *slog.Logger) (map
 		}
 
 		var cfg filter.Config
-		ko.Unmarshal("filter."+id, &cfg)
+		if err := ko.Unmarshal("filter."+id, &cfg); err != nil {
+			log.Fatalf("error unmarshalling filter config: %s: %v", name, err)
+		}
 		if cfg.Config == "" {
-			log.Info(fmt.Sprintf("WARNING: No config 'filter.%s' for '%s' in config", id, id))
+			lo.Info(fmt.Sprintf("WARNING: No config 'filter.%s' for '%s' in config", id, id))
 		}
 
 		// Initialize the plugin.
@@ -224,7 +226,7 @@ func initFilterProviders(names []string, ko *koanf.Koanf, log *slog.Logger) (map
 		if err != nil {
 			return nil, fmt.Errorf("error initializing filter provider plugin '%s': %v", id, err)
 		}
-		log.Info(fmt.Sprintf("loaded filter provider plugin '%s' from %s", id, fName))
+		lo.Info(fmt.Sprintf("loaded filter provider plugin '%s' from %s", id, name))
 
 		p, ok := prov.(filter.Provider)
 		if !ok {

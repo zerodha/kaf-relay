@@ -34,7 +34,7 @@ func main() {
 	lo := initLog(ko)
 
 	// Load the optional filter providers.
-	filters, err := initFilterProviders(ko.Strings("filter"), ko, lo)
+	filters, err := initFilters(ko, lo)
 	if err != nil {
 		log.Fatalf("error initializing filter provider: %v", err)
 	}
