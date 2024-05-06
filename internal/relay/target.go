@@ -41,11 +41,12 @@ type Target struct {
 // NewTarget returns a new producer relay that handles target Kafka instances.
 func NewTarget(globalCtx context.Context, cfg TargetCfg, pCfg ProducerCfg, topics Topics, m *metrics.Set, log *slog.Logger) (*Target, error) {
 	p := &Target{
-		cfg:     cfg,
-		pCfg:    pCfg,
-		ctx:     globalCtx,
-		metrics: m,
-		log:     log,
+		cfg:          cfg,
+		pCfg:         pCfg,
+		ctx:          globalCtx,
+		metrics:      m,
+		log:          log,
+		targetTopics: topics,
 
 		batch:   make([]*kgo.Record, 0, pCfg.BatchSize),
 		batchCh: make(chan *kgo.Record),
