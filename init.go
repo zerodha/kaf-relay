@@ -195,7 +195,7 @@ func initKafkaConfig(ko *koanf.Koanf) ([]relay.ConsumerGroupCfg, relay.ProducerC
 
 // initFilters loads the go plugin, initializes it and return a map of filter plugins.
 func initFilters(ko *koanf.Koanf, lo *slog.Logger) (map[string]filter.Provider, error) {
-	if ko.String("mode") != "single" {
+	if ko.String("mode") != "single" && len(ko.MapKeys("filters")) > 0 {
 		log.Fatalf("filters can only be used in `single` mode.")
 	}
 
