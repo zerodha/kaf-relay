@@ -229,7 +229,7 @@ func (sp *SourcePool) Close() {
 
 // newConn initializes a new consumer group config.
 func (sp *SourcePool) newConn(ctx context.Context, s Server) (*kgo.Client, error) {
-	sp.log.Debug("running TCP health check", "id", s.ID, "server", s.Config.BootstrapBrokers)
+	sp.log.Debug("running TCP health check", "id", s.ID, "server", s.Config.BootstrapBrokers, "session_timeout", s.Config.SessionTimeout)
 	if ok := checkTCP(ctx, s.Config.BootstrapBrokers, s.Config.SessionTimeout); !ok {
 		return nil, ErrorNoHealthy
 	}
@@ -297,12 +297,14 @@ func (sp *SourcePool) healthcheck(ctx context.Context, signal chan struct{}) err
 
 				// For the first ever check, clients will be nil.
 				if clients[i] == nil {
+					sp.log.Debug("initializing admin client for background check", "id", s.ID, "server", s.Config.BootstrapBrokers)
 					cl, err := sp.initConsumerClient(s.Config)
 					if err != nil {
 						sp.log.Error("error initializing admin client in background healthcheck", "id", s.ID, "server", s.Config.BootstrapBrokers, "error", err)
 						continue
 					}
 
+					sp.log.Debug("initialized admin client for background check", "id", s.ID, "server", s.Config.BootstrapBrokers)
 					clients[i] = cl
 				}
 
@@ -314,6 +316,7 @@ func (sp *SourcePool) healthcheck(ctx context.Context, signal chan struct{}) err
 
 					// Get the highest offset of all the topics on the source server and sum them up
 					// to derive the weight of the server.
+					sp.log.Debug("getting high watermark via admin client for background check", "id", idx)
 					offsets, err := sp.GetHighWatermark(ctx, clients[idx])
 					if err != nil && offsets == nil {
 						sp.log.Error("error fetching offset in background healthcheck", "id", s.ID, "server", s.Config.BootstrapBrokers, "error", err)
@@ -506,6 +509,7 @@ func (sp *SourcePool) setWeight(id int, weight int64) {
 			sp.curCandidate = s
 		}
 
+		sp.log.Debug("setting candidate weight", "id", id, "weight", weight, "curr", sp.curCandidate)
 		sp.servers[id] = s
 		break
 	}

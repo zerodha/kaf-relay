@@ -22,8 +22,8 @@ func main() {
 	// Initialize CLI flags.
 	initFlags(ko)
 
+	fmt.Println(buildString)
 	if ko.Bool("version") {
-		fmt.Println(buildString)
 		os.Exit(0)
 	}
 
