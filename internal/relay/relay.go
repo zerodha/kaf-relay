@@ -244,17 +244,21 @@ func (re *Relay) processMessage(ctx context.Context, rec *kgo.Record) error {
 		return nil
 	}
 
-	// Queue the message for writing to target.
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-
-	case re.target.GetBatchCh() <- &kgo.Record{
+	msg := &kgo.Record{
 		Key:       rec.Key,
 		Value:     rec.Value,
 		Topic:     t.TargetTopic,
 		Partition: rec.Partition,
-	}:
+	}
+
+	// Queue the message for writing to target.
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case re.target.GetBatchCh() <- msg:
+	default:
+		re.log.Error("target inlet channel blocked")
+		re.target.GetBatchCh() <- msg
 	}
 
 	return nil
