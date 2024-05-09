@@ -196,6 +196,7 @@ loop:
 				re.log.Debug("marking server as unhealthy", "server", server.ID)
 			}
 
+			re.log.Debug("received fetches", "len", fetches.NumRecords())
 			iter := fetches.RecordIter()
 			for !iter.Done() {
 				rec := iter.Next()
@@ -210,6 +211,7 @@ loop:
 				}
 			}
 
+			re.log.Debug("processed fetches")
 			server.Client.AllowRebalance()
 		}
 	}
