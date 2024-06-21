@@ -126,7 +126,7 @@ func (sp *SourcePool) SetInitialOffsets(of map[string]map[int32]kgo.Offset) {
 	// Set the current candidate with initial weight and a placeholder ID. This initial
 	// weight ensures we resume consuming from where last left off. A real
 	// healthy node should replace this via background checks
-	sp.log.Debug("setting initial target node weight", "weight", w)
+	sp.log.Debug("setting initial target node weight", "weight", w, "topics", of)
 	sp.curCandidate = Server{
 		Healthy: false,
 		Weight:  w,
@@ -506,7 +506,7 @@ func (sp *SourcePool) setWeight(id int, weight int64) {
 
 		// If the incoming server's weight is greater than the current candidate,
 		// promote that to the current candidate.
-		if weight >= sp.curCandidate.Weight {
+		if weight > sp.curCandidate.Weight {
 			sp.curCandidate = s
 		}
 
