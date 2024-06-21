@@ -2,123 +2,91 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log"
-	"log/slog"
 	"os"
 	"os/signal"
 	"syscall"
 
 	"github.com/VictoriaMetrics/metrics"
+	"github.com/knadh/koanf/v2"
+	"github.com/zerodha/kaf-relay/internal/relay"
 )
 
 var (
 	buildString = "unknown"
+	ko          = koanf.New(".")
 )
 
 func main() {
-	ko, cfg := initConfig()
+	// Initialize CLI flags.
+	initFlags(ko)
 
-	// Initialized the structured logger.
-	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
-		AddSource: false,
-		Level:     cfg.App.LogLevel,
-	}))
+	fmt.Println(buildString)
+	if ko.Bool("version") {
+		os.Exit(0)
+	}
+
+	// Read config files.
+	initConfig(ko)
+
+	// Initialized the structured lo.
+	lo := initLog(ko)
 
 	// Load the optional filter providers.
-	filters, err := initFilterProviders(ko.Strings("filter"), ko, logger)
+	filters, err := initFilters(ko, lo)
 	if err != nil {
 		log.Fatalf("error initializing filter provider: %v", err)
 	}
 
-	// Set source consumer topics.
-	var srcTopics []string
-	for t := range cfg.Topics {
-		srcTopics = append(srcTopics, t)
-	}
-	for i := 0; i < len(cfg.Consumers); i++ {
-		cfg.Consumers[i].Topics = srcTopics
-	}
-
-	// Set src:target topic map on the producer.
-	cfg.Producer.Topics = cfg.Topics
-
-	// Create context with interrupts signals.
-	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer cancel()
-
 	// Initialize metrics.
 	metr := metrics.NewSet()
 
-	// Initialize the producer.
-	prod, err := initProducer(ctx, cfg.Producer, cfg.App.Backoff, metr, logger)
+	// Create a global context with interrupts signals.
+	globalCtx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer cancel()
+
+	// Initialize the source and target Kafka config.
+	consumerCfgs, prodConfig := initKafkaConfig(ko)
+
+	// Initialize the source:target topic map from config.
+	topics := initTopicsMap(ko)
+
+	// Initialize the target Kafka (producer) relay.
+	target, err := relay.NewTarget(globalCtx, initTargetConfig(ko), prodConfig, topics, metr, lo)
 	if err != nil {
-		log.Fatalf("error starting producer: %v", err)
+		log.Fatalf("error initializing target controller: %v", err)
 	}
-	prod.maxReqTime = cfg.App.MaxRequestDuration
 
-	// Setup offsets manager with the destination offsets.
-	destOffsets, err := prod.GetEndOffsets(ctx, cfg.App.MaxRequestDuration)
+	hOf, err := target.GetHighWatermark()
 	if err != nil {
-		log.Fatalf("error fetching destination offsets: %v", err)
-	}
-	offsetMgr := &offsetManager{Offsets: destOffsets.KOffsets()}
-
-	// Initialize the consumers.
-	hookCh := make(chan struct{}, 1)
-	var n = make([]Node, len(cfg.Consumers))
-	for i := 0; i < len(cfg.Consumers); i++ {
-		n[i] = Node{
-			Weight: -1,
-			ID:     i,
-		}
+		log.Fatalf("error getting destination high watermark: %v", err)
 	}
 
-	// Initialize the Relay.
-	relay := &Relay{
-		consumer: &consumer{
-			client:      nil, // init during track healthy
-			cfgs:        cfg.Consumers,
-			maxReqTime:  cfg.App.MaxRequestDuration,
-			backoffCfg:  cfg.App.Backoff,
-			offsetMgr:   offsetMgr,
-			nodeTracker: NewNodeTracker(n),
-			log:           logger,
-		},
-
-		producer: prod,
-
-		unhealthyCh: hookCh,
-
-		topics:  cfg.Topics,
-		metrics: metr,
-		logger:  logger,
-
-		maxRetries: cfg.App.MaxFailovers,
-		backoffCfg: cfg.App.Backoff,
-
-		nodeHealthCheckFreq: cfg.App.NodeHealthCheckFreq,
-		lagThreshold:        cfg.App.LagThreshold,
-		maxReqTime:          cfg.App.MaxRequestDuration,
-
-		stopAtEnd:   ko.Bool("stop-at-end"),
-		srcOffsets:  make(map[string]map[int32]int64),
-		destOffsets: destOffsets.KOffsets(),
-
-		filters: filters,
-
-		nodeCh: make(chan int, 1),
+	// Initialize the source Kafka (consumer) relay.
+	srcPool, err := relay.NewSourcePool(initSourcePoolConfig(ko), consumerCfgs, topics, lo)
+	if err != nil {
+		log.Fatalf("error initializing source pool controller: %v", err)
 	}
 
-	// Start metrics HTTP server.
-	metrics := initMetricsServer(relay, cfg.App.MetricsServerAddr)
+	srcPool.SetInitialOffsets(hOf.KOffsets())
 
-	// Start the blocking relay.
-	if err := relay.Start(ctx); err != nil {
-		log.Fatalf("error starting relay: %v", err)
+	// Initialize the Relay which orchestrates consumption from the sourcePool
+	// and writing to the target pool.
+	relay, err := relay.NewRelay(initRelayConfig(ko), srcPool, target, topics, filters, lo)
+	if err != nil {
+		log.Fatalf("error initializing relay controller: %v", err)
 	}
 
-	metrics.Shutdown(ctx)
+	// Start the metrSrv HTTP server.
+	metrSrv := initMetricsServer(metr, ko)
+
+	// Start the relay. This is an indefinitely blocking call.
+	if err := relay.Start(globalCtx); err != nil {
+		log.Fatalf("error starting relay controller: %v", err)
+	}
+
+	metrSrv.Shutdown(globalCtx)
 	relay.Close()
-
-	logger.Info("done")
+	lo.Info("bye")
 }
