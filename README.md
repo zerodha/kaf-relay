@@ -17,24 +17,12 @@ kaf-relay is an opinionated, high performance program for keeping Kafka clusters
 
 ![image](./screenshots/relay.png)
 
-## Prerequisites
-
-* Go installed.
-* Access to the source and destination Kafka clusters.
-
-## Installation
-
-```bash
-git clone https://github.com/zerodha/kaf-relay.git
-cd kaf-relay
-make dist
-```
 
 ## Usage
 
-To run Relay, follow these steps:
+To run kaf-relay, follow these steps:
 
-Create a configuration file named config.toml with the necessary settings. You can use the provided config.example.toml file as a template.
+Copy config.sample.toml to config.toml and edit it accordingly. Then run:
 
 ```bash
 ./kaf-relay.bin --config config.toml --mode <single/failover>
@@ -42,7 +30,7 @@ Create a configuration file named config.toml with the necessary settings. You c
 
 ### Filter plugins
 
-Build your own filter plugins by implementing `filter.Provider` interface.
+Plugins allow to parse and filter incoming messages to allow or deny them from being replicated downstream. Build your own filter plugins by implementing `filter.Provider` interface.
 
 Sample
 ```golang
