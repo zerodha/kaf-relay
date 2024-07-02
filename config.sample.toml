@@ -15,7 +15,9 @@ source_topic2 = "target_topic2"
 [source_pool]
 # Kafka client config common to all upstream sources ([[sources]]).
 initial_offset = "start"
+# static memmbership to pin the member for the consumer group for respawn / reconnect and fence other members from connecting using the same id.
 instance_id = "client_instance_id"
+# consumer group id
 group_id = "consumer_group"
 
 # Frequency at which source servers are polled for health/lag.
