@@ -4,6 +4,7 @@ import (
 	"context"
 	"log/slog"
 	"sync"
+	"time"
 
 	"github.com/twmb/franz-go/pkg/kadm"
 	"github.com/twmb/franz-go/pkg/kgo"
@@ -246,21 +247,28 @@ func (re *Relay) processMessage(ctx context.Context, rec *kgo.Record) error {
 		return nil
 	}
 
-	msg := &kgo.Record{
-		Key:       rec.Key,
-		Value:     rec.Value,
-		Topic:     t.TargetTopic,
-		Partition: rec.Partition,
+	// Repurpose &kgo.Record and forward it to producer to reduce allocs
+	rec.Headers = nil
+	rec.Timestamp = time.Time{}
+	rec.Topic = t.TargetTopic
+	if !t.AutoTargetPartition {
+		rec.Partition = int32(t.TargetPartition)
 	}
+	rec.Attrs = kgo.RecordAttrs{}
+	rec.ProducerEpoch = 0
+	rec.ProducerID = 0
+	rec.LeaderEpoch = 0
+	rec.Offset = 0
+	rec.Context = nil
 
 	// Queue the message for writing to target.
 	select {
 	case <-ctx.Done():
 		return ctx.Err()
-	case re.target.GetBatchCh() <- msg:
+	case re.target.GetBatchCh() <- rec:
 	default:
 		re.log.Error("target inlet channel blocked")
-		re.target.GetBatchCh() <- msg
+		re.target.GetBatchCh() <- rec
 	}
 
 	return nil
