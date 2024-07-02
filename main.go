@@ -89,6 +89,5 @@ func main() {
 	if metrSrv != nil {
 		metrSrv.Shutdown(globalCtx)
 	}
-	relay.Close()
 	lo.Info("bye")
 }

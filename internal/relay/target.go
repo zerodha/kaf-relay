@@ -63,17 +63,12 @@ func NewTarget(globalCtx context.Context, cfg TargetCfg, pCfg ProducerCfg, topic
 	return p, nil
 }
 
-// Close closes the kafka client.
+// Close remove the producer topics from &kgo.Client.
 func (tg *Target) Close() {
 	if tg.client != nil {
 		// prevent blocking on close
 		tg.client.PurgeTopicsFromProducing()
 	}
-}
-
-// CloseBatchCh closes the Producer batch channel.
-func (tg *Target) CloseBatchCh() {
-	close(tg.inletCh)
 }
 
 // GetBatchCh returns the Producer batch channel.
@@ -82,7 +77,10 @@ func (tg *Target) GetBatchCh() chan *kgo.Record {
 }
 
 // Start starts the blocking producer which flushes messages to the target Kafka.
-func (tg *Target) Start(ctx context.Context) error {
+func (tg *Target) Start() error {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
 	tick := time.NewTicker(tg.pCfg.FlushFrequency)
 	defer tick.Stop()
 
@@ -95,13 +93,6 @@ func (tg *Target) Start(ctx context.Context) error {
 
 	for {
 		select {
-		case <-ctx.Done():
-			if err := tg.drain(); err != nil {
-				return err
-			}
-
-			return ctx.Err()
-
 		// Queue the message to and flush if the batch size is reached.
 		case msg, ok := <-tg.inletCh:
 			if !ok {

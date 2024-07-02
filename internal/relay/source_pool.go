@@ -138,6 +138,7 @@ func (sp *SourcePool) SetInitialOffsets(of map[string]map[int32]kgo.Offset) {
 // indefinitely long to return based on the config.
 func (sp *SourcePool) Get(globalCtx context.Context) (*Server, error) {
 	retries := 0
+loop:
 	for {
 		select {
 		case <-globalCtx.Done():
@@ -155,6 +156,7 @@ func (sp *SourcePool) Get(globalCtx context.Context) (*Server, error) {
 					retries++
 					sp.log.Error("new source connection failed", "id", s.ID, "broker", s.Config.BootstrapBrokers, "error", err, "retries", retries)
 					waitTries(globalCtx, sp.backoffFn(retries))
+					continue loop
 				}
 
 				// Cache the current live connection internally.

@@ -71,7 +71,6 @@ func NewRelay(cfg RelayCfg, src *SourcePool, target *Target, topics Topics, filt
 // Start starts the consumer loop on kafka (A), fetch messages and relays over to kafka (B) using an async
 func (re *Relay) Start(globalCtx context.Context) error {
 	wg := &sync.WaitGroup{}
-	defer wg.Wait()
 
 	// Derive a cancellable context from the global context (which captures kill signals) to use
 	// for subsequent connections/health tracking/retries etc.
@@ -96,12 +95,8 @@ func (re *Relay) Start(globalCtx context.Context) error {
 	re.log.Info("starting producer worker")
 	go func() {
 		defer wg.Done()
-		if err := re.target.Start(ctx); err != nil {
+		if err := re.target.Start(); err != nil {
 			re.log.Error("error starting producer worker", "err", err)
-		}
-
-		if ctx.Err() != context.Canceled {
-			cancel()
 		}
 	}()
 
@@ -110,25 +105,31 @@ func (re *Relay) Start(globalCtx context.Context) error {
 	re.log.Info("starting consumer worker")
 	re.signalCh <- struct{}{}
 
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		// wait till main ctx is cancelled
+		<-globalCtx.Done()
+
+		// stop consumer group
+		re.source.Close()
+	}()
+
 	// Start the indefinite poll that asks for new connections
 	// and then consumes messages from them.
 	if err := re.startPoll(ctx); err != nil {
 		re.log.Error("error starting consumer worker", "err", err)
 	}
 
-	// Close the target/producer on exit.
-	re.target.CloseBatchCh()
+	// close the producer inlet channle
+	close(re.target.inletCh)
+
+	// close producer
+	re.target.Close()
 
 	wg.Wait()
 
 	return nil
-}
-
-// Close close the underlying kgo.Client(s)
-func (re *Relay) Close() {
-	re.log.Debug("closing relay consumer, producer...")
-	re.source.Close()
-	re.target.Close()
 }
 
 // startPoll starts the consumer worker which polls the kafka cluster for messages.
