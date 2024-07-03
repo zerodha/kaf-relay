@@ -28,9 +28,6 @@ type Target struct {
 	metrics *metrics.Set
 	log     *slog.Logger
 
-	// Map of optional destination topic partitions.
-	topicPartitions map[string]int32
-
 	// Map of target topics and their config.
 	targetTopics Topics
 
@@ -66,7 +63,7 @@ func NewTarget(globalCtx context.Context, cfg TargetCfg, pCfg ProducerCfg, topic
 	return p, nil
 }
 
-// Close closes the kafka client.
+// Close remove the producer topics from &kgo.Client.
 func (tg *Target) Close() {
 	if tg.client != nil {
 		// prevent blocking on close
@@ -74,26 +71,16 @@ func (tg *Target) Close() {
 	}
 }
 
-// CloseBatchCh closes the Producer batch channel.
-func (tg *Target) CloseBatchCh() {
-	close(tg.inletCh)
-}
-
 // GetBatchCh returns the Producer batch channel.
 func (tg *Target) GetBatchCh() chan *kgo.Record {
 	return tg.inletCh
 }
 
-// prepareRecord checks if custom topic partition mapping is defined.
-// If required, it updates the records partition
-func (tg *Target) prepareRecord(rec *kgo.Record) {
-	if part, ok := tg.topicPartitions[rec.Topic]; ok {
-		rec.Partition = part
-	}
-}
-
 // Start starts the blocking producer which flushes messages to the target Kafka.
-func (tg *Target) Start(ctx context.Context) error {
+func (tg *Target) Start() error {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
 	tick := time.NewTicker(tg.pCfg.FlushFrequency)
 	defer tick.Stop()
 
@@ -106,13 +93,6 @@ func (tg *Target) Start(ctx context.Context) error {
 
 	for {
 		select {
-		case <-ctx.Done():
-			if err := tg.drain(); err != nil {
-				return err
-			}
-
-			return ctx.Err()
-
 		// Queue the message to and flush if the batch size is reached.
 		case msg, ok := <-tg.inletCh:
 			if !ok {
@@ -124,7 +104,6 @@ func (tg *Target) Start(ctx context.Context) error {
 				return nil
 			}
 
-			tg.prepareRecord(msg)
 			tg.batch = append(tg.batch, msg)
 			if len(tg.batch) >= tg.pCfg.FlushBatchSize {
 				if err := tg.flush(ctx); err != nil {
@@ -250,7 +229,6 @@ outerLoop:
 func (tg *Target) drain() error {
 	now := time.Now()
 	for rec := range tg.inletCh {
-		tg.prepareRecord(rec)
 		tg.batch = append(tg.batch, rec)
 	}
 

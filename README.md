@@ -66,7 +66,7 @@ func (f *TestFilter) IsAllowed(msg []byte) bool {
 * Copy this plugin code to a directory. `mkdir testfilter && cp sample.go testfilter`
 * Build the plugin. `CGO_ENABLED=1 go build -a -ldflags="-s -w" -buildmode=plugin -o testfilter.filter sample.go`
 * Change the config.toml to add the filter provider config.
-* Run kaf-relay with the filter pluing. `./kaf-relay.bin --mode single --stop-at-end --filter ./testfilter/testfilter.filter`
+* Run kaf-relay with the filter plugin. `./kaf-relay.bin --mode single --stop-at-end --filter ./testfilter/testfilter.filter`
 
 ## Metrics
 

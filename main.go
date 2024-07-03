@@ -86,7 +86,8 @@ func main() {
 		log.Fatalf("error starting relay controller: %v", err)
 	}
 
-	metrSrv.Shutdown(globalCtx)
-	relay.Close()
+	if metrSrv != nil {
+		metrSrv.Shutdown(globalCtx)
+	}
 	lo.Info("bye")
 }
