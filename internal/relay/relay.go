@@ -106,12 +106,13 @@ func (re *Relay) Start(globalCtx context.Context) error {
 	re.signalCh <- struct{}{}
 
 	wg.Add(1)
+	// Relay teardown.
 	go func() {
 		defer wg.Done()
-		// wait till main ctx is cancelled
+		// Wait till main ctx is cancelled.
 		<-globalCtx.Done()
 
-		// stop consumer group
+		// Stop consumer group.
 		re.source.Close()
 	}()
 
@@ -121,10 +122,10 @@ func (re *Relay) Start(globalCtx context.Context) error {
 		re.log.Error("error starting consumer worker", "err", err)
 	}
 
-	// close the producer inlet channle
+	// Close the producer inlet channel.
 	close(re.target.inletCh)
 
-	// close producer
+	// Close producer.
 	re.target.Close()
 
 	wg.Wait()
@@ -248,7 +249,7 @@ func (re *Relay) processMessage(ctx context.Context, rec *kgo.Record) error {
 		return nil
 	}
 
-	// Repurpose &kgo.Record and forward it to producer to reduce allocs
+	// Repurpose &kgo.Record and forward it to producer to reduce allocs.
 	rec.Headers = nil
 	rec.Timestamp = time.Time{}
 	rec.Topic = t.TargetTopic
