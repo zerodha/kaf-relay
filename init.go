@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"log/slog"
+	"math/rand"
 	"net/http"
 	"os"
 	"plugin"
@@ -182,6 +183,21 @@ func initKafkaConfig(ko *koanf.Koanf) ([]relay.ConsumerGroupCfg, relay.ProducerC
 
 	if err := ko.Unmarshal("", &src); err != nil {
 		log.Fatalf("error unmarshalling `sources` config: %v", err)
+	}
+
+	log.Printf("read config for %d servers in the source pool", len(src.Sources))
+	if ko.Bool("source_pool.randomize_initial") {
+		log.Println("randomizing source pool for initial connection")
+		r := rand.New(rand.NewSource(time.Now().UnixNano()))
+		r.Shuffle(len(src.Sources), func(i, j int) {
+			src.Sources[i], src.Sources[j] = src.Sources[j], src.Sources[i]
+		})
+	}
+
+	// If it's single mode, eliminate all servers in the pool except one
+	// to disable healthcehcks and failover.
+	if ko.String("mode") == relay.ModeSingle {
+		src.Sources = src.Sources[:1]
 	}
 
 	// Read target Kafka config.

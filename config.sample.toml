@@ -42,6 +42,12 @@ backoff_max = "10s"
 # whether it's healthy or not.
 request_timeout = "100ms"
 
+# Pick a random server from the [[sources]] list to connect first on boot
+# instead of the first one from the list. This can be useful for testing
+# servers in production environments that may never be consumed from except
+# during rare failover events.
+randomize_initial = false
+
 
 [[sources]]
 name = "node1"
