@@ -194,6 +194,12 @@ func initKafkaConfig(ko *koanf.Koanf) ([]relay.ConsumerGroupCfg, relay.ProducerC
 		})
 	}
 
+	// If it's single mode, eliminate all servers in the pool except one
+	// to disable healthcehcks and failover.
+	if ko.String("mode") == relay.ModeSingle {
+		src.Sources = src.Sources[:1]
+	}
+
 	// Read target Kafka config.
 	var prod relay.ProducerCfg
 	if err := ko.Unmarshal("target", &prod); err != nil {
