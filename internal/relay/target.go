@@ -164,6 +164,7 @@ func (tg *Target) initProducer(top Topics) (*kgo.Client, error) {
 		} else {
 			tlsOpt, err := getTLSConfig(tg.pCfg.CACertPath, tg.pCfg.ClientCertPath, tg.pCfg.ClientKeyPath)
 			if err != nil {
+				tg.metrics.GetOrCreateCounter(fmt.Sprintf(TargetKafkaErrMetric, "tls config error")).Inc()
 				return nil, err
 			}
 
@@ -188,6 +189,7 @@ outerLoop:
 		default:
 			cl, err = kgo.NewClient(opts...)
 			if err != nil {
+				tg.metrics.GetOrCreateCounter(fmt.Sprintf(TargetNetworkErrMetric, "error creating producer client")).Inc()
 				tg.log.Error("error creating producer client", "error", err)
 				retries++
 				waitTries(tg.ctx, backoff(retries))
@@ -208,6 +210,7 @@ outerLoop:
 
 			// Test connectivity and ensure destination topics exists.
 			if err := testConnection(cl, tg.pCfg.SessionTimeout, topics, partitions); err != nil {
+				tg.metrics.GetOrCreateCounter(fmt.Sprintf(TargetNetworkErrMetric, "error connecting to producer")).Inc()
 				tg.log.Error("error connecting to producer", "err", err)
 				retries++
 				waitTries(tg.ctx, backoff(retries))
@@ -295,13 +298,14 @@ retry:
 				destTopic = tg.targetTopics[res.Record.Topic]
 				part      = res.Record.Partition
 			)
-			tg.metrics.GetOrCreateCounter(fmt.Sprintf(RelayMetric, srcTopic, destTopic, part)).Inc()
+			tg.metrics.GetOrCreateCounter(fmt.Sprintf(RelayedMsgsMetric, srcTopic, destTopic, part)).Inc()
 		}
 
 		tg.log.Debug("produced last offset", "offset", results[len(results)-1].Record.Offset, "batch", batchLen, "retry", retries)
 
 		// retry if there is an error
 		if err != nil {
+			tg.metrics.GetOrCreateCounter(fmt.Sprintf(TargetKafkaErrMetric, "error producing message")).Inc()
 			tg.log.Error("error producing message", "err", err, "failed_count", batchLen, "retry", retries)
 
 			bufRecs := tg.client.BufferedProduceRecords()
@@ -333,6 +337,7 @@ retry:
 	}
 
 	if !sent {
+		tg.metrics.GetOrCreateCounter(fmt.Sprintf(TargetKafkaErrMetric, "error producing message after retries")).Inc()
 		return fmt.Errorf("error producing message; exhausted retries (%v)", tg.pCfg.MaxRetries)
 	}
 

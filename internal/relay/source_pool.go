@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/VictoriaMetrics/metrics"
 	"github.com/twmb/franz-go/pkg/kadm"
 	"github.com/twmb/franz-go/pkg/kgo"
 )
@@ -48,10 +49,11 @@ type Server struct {
 
 // SourcePool manages the source Kafka instances and consumption.
 type SourcePool struct {
-	cfg    SourcePoolCfg
-	client *kgo.Client
-	log    *slog.Logger
-	topics []string
+	cfg     SourcePoolCfg
+	client  *kgo.Client
+	log     *slog.Logger
+	metrics *metrics.Set
+	topics  []string
 
 	offsets map[string]map[int32]kgo.Offset
 
@@ -82,7 +84,7 @@ var (
 
 // NewSourcePool returns a controller instance that manages the lifecycle of a pool of N source (consumer)
 // servers. The pool always attempts to find one healthy node for the relay to consume from.
-func NewSourcePool(cfg SourcePoolCfg, serverCfgs []ConsumerGroupCfg, topics Topics, log *slog.Logger) (*SourcePool, error) {
+func NewSourcePool(cfg SourcePoolCfg, serverCfgs []ConsumerGroupCfg, topics Topics, m *metrics.Set, log *slog.Logger) (*SourcePool, error) {
 	servers := make([]Server, 0, len(serverCfgs))
 
 	// Initially mark all servers as unhealthy.
@@ -105,6 +107,7 @@ func NewSourcePool(cfg SourcePoolCfg, serverCfgs []ConsumerGroupCfg, topics Topi
 		topics:    topicNames,
 		servers:   servers,
 		log:       log,
+		metrics:   m,
 		backoffFn: getBackoffFn(cfg.EnableBackoff, cfg.BackoffMin, cfg.BackoffMax),
 	}, nil
 }
@@ -154,6 +157,7 @@ loop:
 				conn, err := sp.newConn(globalCtx, s)
 				if err != nil {
 					retries++
+					sp.metrics.GetOrCreateCounter(fmt.Sprintf(SrcNetworkErrMetric, s.ID, "new connection failed")).Inc()
 					sp.log.Error("new source connection failed", "id", s.ID, "broker", s.Config.BootstrapBrokers, "error", err, "retries", retries)
 					waitTries(globalCtx, sp.backoffFn(retries))
 					continue loop
@@ -170,6 +174,7 @@ loop:
 			}
 
 			retries++
+			sp.metrics.GetOrCreateCounter(SrcsUnhealthyMetric).Inc()
 			sp.log.Error("no healthy server found. waiting and retrying", "retries", retries)
 			waitTries(globalCtx, sp.backoffFn(retries))
 		}
@@ -183,6 +188,7 @@ func (sp *SourcePool) GetFetches(s *Server) (kgo.Fetches, error) {
 
 	// There's no connection.
 	if fetches.IsClientClosed() {
+		sp.metrics.GetOrCreateCounter(fmt.Sprintf(SrcKafkaErrMetric, s.ID, "client closed")).Inc()
 		sp.log.Debug("retrieving fetches failed. client closed.", "id", s.ID, "broker", s.Config.BootstrapBrokers)
 		sp.setWeight(s.ID, unhealthyWeight)
 
@@ -191,6 +197,7 @@ func (sp *SourcePool) GetFetches(s *Server) (kgo.Fetches, error) {
 
 	// If there are errors in the fetches, handle them.
 	for _, err := range fetches.Errors() {
+		sp.metrics.GetOrCreateCounter(fmt.Sprintf(SrcKafkaErrMetric, s.ID, "fetches error")).Inc()
 		sp.log.Error("found error in fetches", "server", s.ID, "error", err.Err)
 		sp.setWeight(s.ID, unhealthyWeight)
 
@@ -513,6 +520,7 @@ func (sp *SourcePool) setWeight(id int, weight int64) {
 			sp.curCandidate = s
 		}
 
+		sp.metrics.GetOrCreateCounter(fmt.Sprintf(SrcHealthMetric, id)).Set(uint64(weight))
 		sp.log.Debug("setting candidate weight", "id", id, "weight", weight, "curr", sp.curCandidate)
 		sp.servers[id] = s
 		break
