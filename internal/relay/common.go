@@ -20,8 +20,17 @@ import (
 	"github.com/twmb/franz-go/pkg/sasl/scram"
 )
 
+const relayMetricPrefix = "kafka_relay_"
+
 var (
-	RelayMetric = "kafka_relay_msg_count{source=\"%s\", destination=\"%s\", partition=\"%d\"}"
+	SrcNetworkErrMetric = relayMetricPrefix + "source_errors_total{source=\"%d\", error=\"%s\"}"
+	SrcsUnhealthyMetric = relayMetricPrefix + "sources_unhealthy_total"
+	SrcKafkaErrMetric   = relayMetricPrefix + "source_kafka_errors_total{source=\"%d\", error=\"%s\"}"
+	SrcHealthMetric     = relayMetricPrefix + "source_highwatermark{source=\"%d\"}"
+
+	TargetNetworkErrMetric = relayMetricPrefix + "source_errors_total{source=\"%d\", error=\"%s\"}"
+	TargetKafkaErrMetric   = relayMetricPrefix + "target_kafka_errors_total{error=\"%s\"}"
+	RelayedMsgsMetric      = relayMetricPrefix + "msgs_total{source=\"%s\", destination=\"%s\", partition=\"%d\"}"
 
 	ErrLaggingBehind = fmt.Errorf("topic end offset is lagging behind")
 )
