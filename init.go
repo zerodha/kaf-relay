@@ -276,19 +276,10 @@ func initMetricsServer(metrics *metrics.Set, ko *koanf.Koanf) *http.Server {
 		buf.WriteTo(w)
 	})
 
-	srv := &http.Server{
+	return &http.Server{
 		Addr:         ko.MustString("app.metrics_server_addr"),
 		Handler:      mux,
 		ReadTimeout:  10 * time.Second,
 		WriteTimeout: 10 * time.Second,
 	}
-
-	go func() {
-		err := srv.ListenAndServe()
-		if err != nil && err != http.ErrServerClosed {
-			log.Printf("error starting server: %v", err)
-		}
-	}()
-
-	return srv
 }

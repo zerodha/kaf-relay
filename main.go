@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
@@ -39,12 +40,19 @@ func main() {
 		log.Fatalf("error initializing filter provider: %v", err)
 	}
 
-	// Initialize metrics.
-	metr := metrics.NewSet()
-
 	// Create a global context with interrupts signals.
 	globalCtx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
+
+	// Initialize metrics set and start the HTTP server.
+	metr := metrics.NewSet()
+	metrSrv := initMetricsServer(metr, ko)
+	go func() {
+		if err := metrSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Printf("error starting server: %v", err)
+		}
+	}()
+	defer metrSrv.Shutdown(globalCtx)
 
 	// Initialize the source and target Kafka config.
 	consumerCfgs, prodConfig := initKafkaConfig(ko)
@@ -78,16 +86,10 @@ func main() {
 		log.Fatalf("error initializing relay controller: %v", err)
 	}
 
-	// Start the metrSrv HTTP server.
-	metrSrv := initMetricsServer(metr, ko)
-
 	// Start the relay. This is an indefinitely blocking call.
 	if err := relay.Start(globalCtx); err != nil {
 		log.Fatalf("error starting relay controller: %v", err)
 	}
 
-	if metrSrv != nil {
-		metrSrv.Shutdown(globalCtx)
-	}
 	lo.Info("bye")
 }
