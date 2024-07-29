@@ -8,7 +8,7 @@ require (
 	github.com/knadh/koanf/providers/posflag v0.1.0
 	github.com/knadh/koanf/v2 v2.0.1
 	github.com/spf13/pflag v1.0.5
-	github.com/twmb/franz-go v1.17.0
+	github.com/twmb/franz-go v1.17.1
 	github.com/twmb/franz-go/pkg/kmsg v1.8.0
 )
 
