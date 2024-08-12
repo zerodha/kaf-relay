@@ -30,7 +30,7 @@ var (
 
 	TargetNetworkErrMetric = relayMetricPrefix + "source_errors_total{source=\"%d\", error=\"%s\"}"
 	TargetKafkaErrMetric   = relayMetricPrefix + "target_kafka_errors_total{error=\"%s\"}"
-	RelayedMsgsMetric      = relayMetricPrefix + "msgs_total{source=\"%s\", destination=\"%s\", partition=\"%d\"}"
+	RelayedMsgsMetric      = relayMetricPrefix + "msgs_total{source=\"%s\", src_partition=\"%d\", destination=\"%s\", dest_partition=\"%d\"}"
 
 	ErrLaggingBehind = fmt.Errorf("topic end offset is lagging behind")
 )
