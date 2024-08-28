@@ -298,7 +298,7 @@ retry:
 				destTopic = tg.targetTopics[res.Record.Topic]
 				part      = res.Record.Partition
 			)
-			tg.metrics.GetOrCreateCounter(fmt.Sprintf(RelayedMsgsMetric, srcTopic, destTopic, part)).Inc()
+			tg.metrics.GetOrCreateCounter(fmt.Sprintf(RelayedMsgsMetric, srcTopic, part, destTopic.TargetTopic, destTopic.TargetPartition)).Inc()
 		}
 
 		tg.log.Debug("produced last offset", "offset", results[len(results)-1].Record.Offset, "batch", batchLen, "retry", retries)
