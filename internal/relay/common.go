@@ -23,12 +23,12 @@ import (
 const relayMetricPrefix = "kafka_relay_"
 
 var (
-	SrcNetworkErrMetric = relayMetricPrefix + "source_errors_total{source=\"%d\", error=\"%s\"}"
+	SrcNetworkErrMetric = relayMetricPrefix + "source_errors_total{node_id=\"%d\", error=\"%s\"}"
 	SrcsUnhealthyMetric = relayMetricPrefix + "sources_unhealthy_total"
-	SrcKafkaErrMetric   = relayMetricPrefix + "source_kafka_errors_total{source=\"%d\", error=\"%s\"}"
-	SrcHealthMetric     = relayMetricPrefix + "source_highwatermark{source=\"%d\"}"
+	SrcKafkaErrMetric   = relayMetricPrefix + "source_kafka_errors_total{node_id=\"%d\", error=\"%s\"}"
+	SrcHealthMetric     = relayMetricPrefix + "source_highwatermark{node_id=\"%d\"}"
 
-	TargetNetworkErrMetric = relayMetricPrefix + "source_errors_total{source=\"%d\", error=\"%s\"}"
+	TargetNetworkErrMetric = relayMetricPrefix + "target_errors_total{error=\"%s\"}"
 	TargetKafkaErrMetric   = relayMetricPrefix + "target_kafka_errors_total{error=\"%s\"}"
 	RelayedMsgsMetric      = relayMetricPrefix + "msgs_total{source=\"%s\", src_partition=\"%d\", destination=\"%s\", dest_partition=\"%d\"}"
 
