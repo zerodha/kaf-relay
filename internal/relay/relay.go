@@ -196,7 +196,10 @@ loop:
 
 			fetches, err := re.source.GetFetches(server)
 			if err != nil {
-				re.log.Debug("marking server as unhealthy", "server", server.ID)
+				re.log.Error("marking server as unhealthy", "server", server.ID)
+				re.signalCh <- struct{}{}
+
+				continue loop
 			}
 
 			re.log.Debug("received fetches", "len", fetches.NumRecords())
