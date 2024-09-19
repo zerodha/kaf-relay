@@ -368,7 +368,12 @@ func (sp *SourcePool) healthcheck(ctx context.Context, signal chan struct{}) err
 					sp.fetchCancel()
 
 					// Signal the relay poll loop to start asking for a healthy client.
-					signal <- struct{}{}
+					// The push is non-blocking to avoid getting stuck trying to send on the poll loop
+					// if the poll loop's subsection (checking for errors) has already sent a signal
+					select {
+					case signal <- struct{}{}:
+					default:
+					}
 				}
 			}
 		}

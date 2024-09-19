@@ -103,7 +103,12 @@ func (re *Relay) Start(globalCtx context.Context) error {
 	// Start the consumer group worker by trigger a signal to the relay loop to fetch
 	// a consumer worker to fetch initial healthy node.
 	re.log.Info("starting consumer worker")
-	re.signalCh <- struct{}{}
+	// The push is non-blocking to avoid getting stuck trying to send on the poll loop
+	// if the threshold checker go-routine might have already sent on the channel concurrently.
+	select {
+	case re.signalCh <- struct{}{}:
+	default:
+	}
 
 	wg.Add(1)
 	// Relay teardown.
@@ -179,7 +184,12 @@ loop:
 					of, err := re.source.GetHighWatermark(ctx, server.Client)
 					if err != nil {
 						re.log.Error("could not get end offsets (first poll); sending unhealthy signal", "id", server.ID, "server", server.Config.BootstrapBrokers, "error", err)
-						re.signalCh <- struct{}{}
+						// The push is non-blocking to avoid getting stuck trying to send on the poll loop
+						// if the threshold checker go-routine might have already sent on the channel concurrently.
+						select {
+						case re.signalCh <- struct{}{}:
+						default:
+						}
 
 						continue loop
 					}
@@ -197,7 +207,12 @@ loop:
 			fetches, err := re.source.GetFetches(server)
 			if err != nil {
 				re.log.Error("marking server as unhealthy", "server", server.ID)
-				re.signalCh <- struct{}{}
+				// The push is non-blocking to avoid getting stuck trying to send on the poll loop
+				// if the threshold checker go-routine might have already sent on the channel concurrently.
+				select {
+				case re.signalCh <- struct{}{}:
+				default:
+				}
 
 				continue loop
 			}
