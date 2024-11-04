@@ -609,11 +609,11 @@ waitForTopicLag:
 	sp.log.Info("resetting offsets for consumer group", "id", s.ID, "server", s.Config.BootstrapBrokers, "offsets", of)
 	resp, err := admCl.CommitOffsets(ctx, sp.cfg.GroupID, of)
 	if err != nil {
-		sp.log.Error("error resetting group offset", "err", err)
+		return fmt.Errorf("error resetting group offset: %w", err)
 	}
 
 	if err := resp.Error(); err != nil {
-		sp.log.Error("error resetting group offset", "err", err)
+		return fmt.Errorf("error resetting group offset: %w", err)
 	}
 
 	// _ = resp
