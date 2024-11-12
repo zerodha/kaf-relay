@@ -57,6 +57,7 @@ type ProducerCfg struct {
 	FlushFrequency    time.Duration `koanf:"flush_frequency"`
 	MaxMessageBytes   int           `koanf:"max_message_bytes"`
 	BatchSize         int           `koanf:"batch_size"`
+	BufferSize        int           `koanf:"buffer_size"`
 	FlushBatchSize    int           `koanf:"flush_batch_size"`
 	Compression       string        `koanf:"compression"` // gzip|snappy|lz4|zstd|none
 }

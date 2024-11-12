@@ -105,6 +105,7 @@ ca_cert_path = ""
 max_retries = -1
 flush_batch_size = 1000
 batch_size = 1000
+buffer_size = 100000 # channel buffer length
 max_message_bytes = 10000000
 
 # Kafka exponential retry-backoff config for reconnection attempts.
