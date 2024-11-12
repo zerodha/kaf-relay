@@ -30,7 +30,7 @@ type Relay struct {
 	// If stop-at-end is enabled, the "end" offsets of the source
 	// read at the time of boot are cached here to compare against
 	// live offsets and stop consumption.
-	targetOffsets map[string]map[int32]kgo.Offset
+	targetOffsets TopicOffsets
 
 	// Live topic offsets from source.
 	srcOffsets map[string]map[int32]int64
@@ -42,7 +42,7 @@ type Relay struct {
 func NewRelay(cfg RelayCfg, src *SourcePool, target *Target, topics Topics, filters map[string]filter.Provider, log *slog.Logger) (*Relay, error) {
 	// If stop-at-end is set, fetch and cache the offsets to determine
 	// when end is reached.
-	var offsets map[string]map[int32]kgo.Offset
+	var offsets TopicOffsets
 	if cfg.StopAtEnd {
 		if o, err := target.GetHighWatermark(); err != nil {
 			return nil, err
@@ -223,7 +223,7 @@ loop:
 				rec := iter.Next()
 				// Always record the latest offsets before the messages are processed for new connections and
 				// retries to consume from where it was left off.
-				// NOTE: What if the next step fails? The messages won't be read again?
+				// TODO: What if the next step fails? The messages won't be read again?
 				re.source.RecordOffsets(rec)
 
 				if err := re.processMessage(ctx, rec); err != nil {

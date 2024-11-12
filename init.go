@@ -92,8 +92,6 @@ func initSourcePoolConfig(ko *koanf.Koanf) relay.SourcePoolCfg {
 		EnableBackoff:       ko.Bool("source_pool.backoff_enable"),
 		BackoffMin:          ko.MustDuration("source_pool.backoff_min"),
 		BackoffMax:          ko.MustDuration("source_pool.backoff_max"),
-		GroupID:             ko.MustString("source_pool.group_id"),
-		InstanceID:          ko.MustString("source_pool.instance_id"),
 	}
 }
 
@@ -175,10 +173,10 @@ func initTopicsMap(ko *koanf.Koanf) relay.Topics {
 }
 
 // initKafkaConfig reads the source(s)/target Kafka configuration.
-func initKafkaConfig(ko *koanf.Koanf) ([]relay.ConsumerGroupCfg, relay.ProducerCfg) {
+func initKafkaConfig(ko *koanf.Koanf) ([]relay.ConsumerCfg, relay.ProducerCfg) {
 	// Read source Kafka config.
 	src := struct {
-		Sources []relay.ConsumerGroupCfg `koanf:"sources"`
+		Sources []relay.ConsumerCfg `koanf:"sources"`
 	}{}
 
 	if err := ko.Unmarshal("", &src); err != nil {

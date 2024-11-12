@@ -72,12 +72,10 @@ func main() {
 	}
 
 	// Initialize the source Kafka (consumer) relay.
-	srcPool, err := relay.NewSourcePool(initSourcePoolConfig(ko), consumerCfgs, topics, metr, lo)
+	srcPool, err := relay.NewSourcePool(initSourcePoolConfig(ko), consumerCfgs, topics, hOf.KOffsets(), metr, lo)
 	if err != nil {
 		log.Fatalf("error initializing source pool controller: %v", err)
 	}
-
-	srcPool.SetInitialOffsets(hOf.KOffsets())
 
 	// Initialize the Relay which orchestrates consumption from the sourcePool
 	// and writing to the target pool.

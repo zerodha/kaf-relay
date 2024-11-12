@@ -42,8 +42,8 @@ type KafkaCfg struct {
 	EnableLog bool `koanf:"enable_log"`
 }
 
-// ConsumerGroupCfg is the consumer group specific config.
-type ConsumerGroupCfg struct {
+// ConsumerCfg is the direct consumer config.
+type ConsumerCfg struct {
 	KafkaCfg `koanf:",squash"`
 }
 
