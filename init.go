@@ -99,7 +99,7 @@ func initSourcePoolConfig(ko *koanf.Koanf) relay.SourcePoolCfg {
 
 func initRelayConfig(ko *koanf.Koanf) relay.RelayCfg {
 	return relay.RelayCfg{
-		StopAtEnd: ko.Bool("stop_at_end"),
+		StopAtEnd: ko.Bool("stop-at-end"),
 	}
 }
 
