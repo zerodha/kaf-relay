@@ -97,7 +97,7 @@ func initSourcePoolConfig(ko *koanf.Koanf) relay.SourcePoolCfg {
 
 func initRelayConfig(ko *koanf.Koanf) relay.RelayCfg {
 	return relay.RelayCfg{
-		StopAtEnd: ko.Bool("stop_at_end"),
+		StopAtEnd: ko.Bool("stop-at-end"),
 	}
 }
 
@@ -235,11 +235,11 @@ func initFilters(ko *koanf.Koanf, lo *slog.Logger) (map[string]filter.Provider, 
 		}
 
 		var cfg filter.Config
-		if err := ko.Unmarshal("filter."+id, &cfg); err != nil {
+		if err := ko.Unmarshal("filters."+id, &cfg); err != nil {
 			log.Fatalf("error unmarshalling filter config: %s: %v", id, err)
 		}
 		if cfg.Config == "" {
-			lo.Info(fmt.Sprintf("WARNING: No config 'filter.%s' for '%s' in config", id, id))
+			lo.Info(fmt.Sprintf("WARNING: No config 'filters.%s' for '%s' in config", id, id))
 		}
 
 		// Initialize the plugin.

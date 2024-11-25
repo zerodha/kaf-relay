@@ -12,7 +12,7 @@ import (
 )
 
 type RelayCfg struct {
-	StopAtEnd bool `koanf:"stop_at_end"`
+	StopAtEnd bool
 }
 
 // Relay represents the input, output kafka and the remapping necessary to forward messages from one topic to another.
@@ -115,7 +115,7 @@ func (re *Relay) Start(globalCtx context.Context) error {
 	go func() {
 		defer wg.Done()
 		// Wait till main ctx is cancelled.
-		<-globalCtx.Done()
+		<-ctx.Done()
 
 		// Stop consumer group.
 		re.source.Close()
@@ -133,6 +133,7 @@ func (re *Relay) Start(globalCtx context.Context) error {
 	// Close producer.
 	re.target.Close()
 
+	cancel()
 	wg.Wait()
 
 	return nil
