@@ -49,7 +49,7 @@ func NewTarget(globalCtx context.Context, cfg TargetCfg, pCfg ProducerCfg, topic
 		targetTopics: topics,
 
 		batch:   make([]*kgo.Record, 0, pCfg.BatchSize),
-		inletCh: make(chan *kgo.Record, pCfg.BatchSize*10),
+		inletCh: make(chan *kgo.Record, pCfg.BufferSize),
 	}
 
 	// Initialize the actual Kafka client.

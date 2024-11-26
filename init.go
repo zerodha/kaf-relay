@@ -92,14 +92,12 @@ func initSourcePoolConfig(ko *koanf.Koanf) relay.SourcePoolCfg {
 		EnableBackoff:       ko.Bool("source_pool.backoff_enable"),
 		BackoffMin:          ko.MustDuration("source_pool.backoff_min"),
 		BackoffMax:          ko.MustDuration("source_pool.backoff_max"),
-		GroupID:             ko.MustString("source_pool.group_id"),
-		InstanceID:          ko.MustString("source_pool.instance_id"),
 	}
 }
 
 func initRelayConfig(ko *koanf.Koanf) relay.RelayCfg {
 	return relay.RelayCfg{
-		StopAtEnd: ko.Bool("stop_at_end"),
+		StopAtEnd: ko.Bool("stop-at-end"),
 	}
 }
 
@@ -175,10 +173,10 @@ func initTopicsMap(ko *koanf.Koanf) relay.Topics {
 }
 
 // initKafkaConfig reads the source(s)/target Kafka configuration.
-func initKafkaConfig(ko *koanf.Koanf) ([]relay.ConsumerGroupCfg, relay.ProducerCfg) {
+func initKafkaConfig(ko *koanf.Koanf) ([]relay.ConsumerCfg, relay.ProducerCfg) {
 	// Read source Kafka config.
 	src := struct {
-		Sources []relay.ConsumerGroupCfg `koanf:"sources"`
+		Sources []relay.ConsumerCfg `koanf:"sources"`
 	}{}
 
 	if err := ko.Unmarshal("", &src); err != nil {
@@ -237,11 +235,11 @@ func initFilters(ko *koanf.Koanf, lo *slog.Logger) (map[string]filter.Provider, 
 		}
 
 		var cfg filter.Config
-		if err := ko.Unmarshal("filter."+id, &cfg); err != nil {
+		if err := ko.Unmarshal("filters."+id, &cfg); err != nil {
 			log.Fatalf("error unmarshalling filter config: %s: %v", id, err)
 		}
 		if cfg.Config == "" {
-			lo.Info(fmt.Sprintf("WARNING: No config 'filter.%s' for '%s' in config", id, id))
+			lo.Info(fmt.Sprintf("WARNING: No config 'filters.%s' for '%s' in config", id, id))
 		}
 
 		// Initialize the plugin.
