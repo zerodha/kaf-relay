@@ -225,7 +225,10 @@ loop:
 				// Always record the latest offsets before the messages are processed for new connections and
 				// retries to consume from where it was left off.
 				// TODO: What if the next step fails? The messages won't be read again?
-				re.source.RecordOffsets(rec)
+				if err := re.source.RecordOffsets(rec); err != nil {
+					re.log.Error("error recording offset", "err", err)
+					return err
+				}
 
 				if err := re.processMessage(ctx, rec); err != nil {
 					re.log.Error("error processing message", "err", err)
