@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 
 	"github.com/VictoriaMetrics/metrics"
@@ -60,34 +61,51 @@ func main() {
 	// Initialize the source:target topic map from config.
 	topics := initTopicsMap(ko)
 
-	// Initialize the target Kafka (producer) relay.
-	target, err := relay.NewTarget(globalCtx, initTargetConfig(ko), prodConfig, topics, metr, lo)
-	if err != nil {
-		log.Fatalf("error initializing target controller: %v", err)
+	var wg sync.WaitGroup
+	// Spawn a relay per topic
+	for _, topic := range topics {
+		topic := topic
+
+		wg.Add(1)
+		go func() {
+			// Start the relay. This is an indefinitely blocking call.
+			defer wg.Done()
+
+			target, err := relay.NewTarget(globalCtx, initTargetConfig(ko), prodConfig, topics, metr, lo)
+			if err != nil {
+				log.Fatalf("error initializing target controller: %v", err)
+			}
+
+			hOf, err := target.GetHighWatermark()
+			if err != nil {
+				log.Fatalf("error getting destination high watermark: %v", err)
+			}
+
+			targetOffsets := hOf.KOffsets()
+			hw, ok := targetOffsets[topic.TargetTopic]
+			if !ok {
+				log.Fatalf("error fetching end offset for target topic %s", topic.TargetTopic)
+			}
+
+			// Initialize the source Kafka (consumer) relay.
+			srcPool, err := relay.NewSourcePool(initSourcePoolConfig(ko), consumerCfgs, topic, hw, metr, lo)
+			if err != nil {
+				log.Fatalf("error initializing source pool controller: %v", err)
+			}
+
+			// Initialize the Relay which orchestrates consumption from the sourcePool
+			// and writing to the target pool.
+			relay, err := relay.NewRelay(initRelayConfig(ko), srcPool, target, topic, filters, lo)
+			if err != nil {
+				log.Fatalf("error initializing relay controller: %v", err)
+			}
+
+			if err := relay.Start(globalCtx); err != nil {
+				log.Fatalf("error starting relay controller: %v", err)
+			}
+		}()
 	}
 
-	hOf, err := target.GetHighWatermark()
-	if err != nil {
-		log.Fatalf("error getting destination high watermark: %v", err)
-	}
-
-	// Initialize the source Kafka (consumer) relay.
-	srcPool, err := relay.NewSourcePool(initSourcePoolConfig(ko), consumerCfgs, topics, hOf.KOffsets(), metr, lo)
-	if err != nil {
-		log.Fatalf("error initializing source pool controller: %v", err)
-	}
-
-	// Initialize the Relay which orchestrates consumption from the sourcePool
-	// and writing to the target pool.
-	relay, err := relay.NewRelay(initRelayConfig(ko), srcPool, target, topics, filters, lo)
-	if err != nil {
-		log.Fatalf("error initializing relay controller: %v", err)
-	}
-
-	// Start the relay. This is an indefinitely blocking call.
-	if err := relay.Start(globalCtx); err != nil {
-		log.Fatalf("error starting relay controller: %v", err)
-	}
-
+	wg.Wait()
 	lo.Info("bye")
 }

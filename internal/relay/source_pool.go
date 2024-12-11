@@ -44,23 +44,20 @@ type Server struct {
 	Client *kgo.Client
 }
 
-// TopicOffsets defines topic->partition->offset map for any src/target kafka cluster
-type TopicOffsets map[string]map[int32]kgo.Offset
+// TopicOffsets defines partition->offset map for any single src/target kafka topic
+type TopicOffsets map[int32]kgo.Offset
 
 // SourcePool manages the source Kafka instances and consumption.
 type SourcePool struct {
-	cfg         SourcePoolCfg
-	client      *kgo.Client
-	log         *slog.Logger
-	metrics     *metrics.Set
-	targetToSrc map[string]string
-	srcToTarget map[string]string
-	srcTopics   []string
+	cfg     SourcePoolCfg
+	log     *slog.Logger
+	metrics *metrics.Set
 
 	// targetOffsets is initialized with current topic high watermarks from target.
 	// These are updated whenever new msgs from src are sent to target for producing.
 	// Whenever a new direct src consumer starts consuming from respective topic it uses
 	// the offsets from this map. (These happen independently in the pool loop, hence no lock)
+	topic         Topic
 	targetOffsets TopicOffsets
 
 	// List of all source servers.
@@ -72,9 +69,10 @@ type SourcePool struct {
 	// for instance, when all sources are down. In such a scenario, the poll simply
 	// keeps retriying until a real viable candidate is available.
 	curCandidate Server
+	lastSentID   int
 
 	fetchCtx    context.Context
-	fetchCancel context.CancelFunc
+	cancelFetch context.CancelFunc
 
 	backoffFn func(int) time.Duration
 	sync.Mutex
@@ -90,7 +88,7 @@ var (
 
 // NewSourcePool returns a controller instance that manages the lifecycle of a pool of N source (consumer)
 // servers. The pool always attempts to find one healthy node for the relay to consume from.
-func NewSourcePool(cfg SourcePoolCfg, serverCfgs []ConsumerCfg, topics Topics, targetOffsets TopicOffsets, m *metrics.Set, log *slog.Logger) (*SourcePool, error) {
+func NewSourcePool(cfg SourcePoolCfg, serverCfgs []ConsumerCfg, topic Topic, targetOffsets TopicOffsets, m *metrics.Set, log *slog.Logger) (*SourcePool, error) {
 	servers := make([]Server, 0, len(serverCfgs))
 
 	// Initially mark all servers as unhealthy.
@@ -103,26 +101,13 @@ func NewSourcePool(cfg SourcePoolCfg, serverCfgs []ConsumerCfg, topics Topics, t
 		})
 	}
 
-	var (
-		srcToTarg = make(map[string]string, len(topics))
-		targToSrc = make(map[string]string, len(topics))
-		srcTopics = make([]string, 0, len(topics))
-	)
-	for src, targ := range topics {
-		srcTopics = append(srcTopics, src)
-		targToSrc[targ.TargetTopic] = src
-		srcToTarg[src] = targ.TargetTopic
-	}
-
 	sp := &SourcePool{
-		cfg:         cfg,
-		targetToSrc: targToSrc,
-		srcToTarget: srcToTarg,
-		srcTopics:   srcTopics,
-		servers:     servers,
-		log:         log,
-		metrics:     m,
-		backoffFn:   getBackoffFn(cfg.EnableBackoff, cfg.BackoffMin, cfg.BackoffMax),
+		cfg:       cfg,
+		topic:     topic,
+		servers:   servers,
+		log:       log,
+		metrics:   m,
+		backoffFn: getBackoffFn(cfg.EnableBackoff, cfg.BackoffMin, cfg.BackoffMax),
 	}
 
 	sp.setInitialOffsets(targetOffsets)
@@ -135,18 +120,15 @@ func (sp *SourcePool) setInitialOffsets(of TopicOffsets) {
 	// Assign the current weight as initial target offset.
 	// This is done to resume if target already has messages published from src.
 	var w int64
-	for _, p := range of {
-		for _, o := range p {
-			w += o.EpochOffset().Offset
-		}
+	for _, o := range of {
+		w += o.EpochOffset().Offset
 	}
-
-	sp.targetOffsets = of
 
 	// Set the current candidate with initial weight and a placeholder ID. This initial
 	// weight ensures we resume consuming from where last left off. A real
 	// healthy node should replace this via background checks
 	sp.log.Debug("setting initial target node weight", "weight", w, "topics", of)
+	sp.targetOffsets = of
 	sp.curCandidate = Server{
 		Healthy: false,
 		Weight:  w,
@@ -181,13 +163,10 @@ loop:
 					continue loop
 				}
 
-				// XXX: Cache the current live connection internally.
-				sp.client = conn
-
 				out := s
 				out.Client = conn
 
-				sp.fetchCtx, sp.fetchCancel = context.WithCancel(globalCtx)
+				sp.fetchCtx, sp.cancelFetch = context.WithCancel(globalCtx)
 				return &out, nil
 			}
 
@@ -232,35 +211,16 @@ func (sp *SourcePool) RecordOffsets(rec *kgo.Record) error {
 		sp.targetOffsets = make(TopicOffsets)
 	}
 
-	topic, ok := sp.srcToTarget[rec.Topic]
-	if !ok {
+	if sp.topic.SourceTopic != rec.Topic {
 		return fmt.Errorf("target topic not found for src topic %s", rec.Topic)
 	}
-
-	if o, ok := sp.targetOffsets[topic]; ok {
-		// If the topic already exists, update the offset for the partition.
-		o[rec.Partition] = kgo.NewOffset().At(rec.Offset + 1)
-		sp.targetOffsets[topic] = o
-	} else {
-		// If the topic does not exist, create a new map for the topic.
-		o := make(map[int32]kgo.Offset)
-		o[rec.Partition] = kgo.NewOffset().At(rec.Offset + 1)
-		sp.targetOffsets[topic] = o
-	}
+	sp.targetOffsets[rec.Partition] = kgo.NewOffset().At(rec.Offset + 1)
 
 	return nil
 }
 
 func (sp *SourcePool) GetHighWatermark(ctx context.Context, cl *kgo.Client) (kadm.ListedOffsets, error) {
-	return getHighWatermark(ctx, cl, sp.srcTopics, sp.cfg.ReqTimeout)
-}
-
-// Close closes the active source Kafka client.
-func (sp *SourcePool) Close() {
-	if sp.client != nil {
-		// Prevent blocking on close.
-		sp.client.PurgeTopicsFromConsuming()
-	}
+	return getHighWatermark(ctx, cl, []string{sp.topic.SourceTopic}, sp.cfg.ReqTimeout)
 }
 
 // newConn initializes a new consumer group config.
@@ -342,6 +302,12 @@ func (sp *SourcePool) healthcheck(ctx context.Context, signal chan struct{}) err
 					if err != nil && offsets == nil {
 						sp.log.Error("error fetching offset in background healthcheck", "id", s.ID, "server", s.Config.BootstrapBrokers, "error", err)
 						sp.setWeight(servers[idx].ID, unhealthyWeight)
+						// If the current candidate is no longer healthy,
+						// signal relay to stop polling it.
+						if s.ID == sp.lastSentID && sp.cancelFetch != nil {
+							sp.cancelFetch()
+						}
+
 						return
 					}
 
@@ -375,7 +341,7 @@ func (sp *SourcePool) healthcheck(ctx context.Context, signal chan struct{}) err
 					sp.setWeight(s.ID, unhealthyWeight)
 
 					// Cancel any active fetches.
-					sp.fetchCancel()
+					sp.cancelFetch()
 
 					// Signal the relay poll loop to start asking for a healthy client.
 					// The push is non-blocking to avoid getting stuck trying to send on the poll loop
@@ -390,34 +356,16 @@ func (sp *SourcePool) healthcheck(ctx context.Context, signal chan struct{}) err
 	}
 }
 
-var offsetPool = sync.Pool{
-	New: func() interface{} {
-		return make(TopicOffsets)
-	},
-}
-
 // initConsumer initializes a Kafka consumer client. This is used for creating consumer connection to source servers.
 func (sp *SourcePool) initConsumer(cfg ConsumerCfg) (*kgo.Client, error) {
-	srcOffsets := offsetPool.Get().(TopicOffsets)
-	defer func() {
-		for k := range srcOffsets {
-			delete(srcOffsets, k)
-		}
-		offsetPool.Put(srcOffsets)
-	}()
-
-	// For each target topic get the relevant src topic to configure direct
-	// consumer to start from target topic's last offset.
-	for t, of := range sp.targetOffsets {
-		src, ok := sp.targetToSrc[t]
-		if !ok {
-			return nil, fmt.Errorf("src topic not found for target %s in map", t)
-		}
-		srcOffsets[src] = of
+	// TODO: check if this grows
+	cp := make(map[int32]kgo.Offset)
+	for p, o := range sp.targetOffsets {
+		cp[p] = kgo.NewOffset().At(o.EpochOffset().Offset)
 	}
 
 	opts := []kgo.Opt{
-		kgo.ConsumePartitions(srcOffsets),
+		kgo.ConsumePartitions(map[string]map[int32]kgo.Offset{sp.topic.SourceTopic: cp}),
 		kgo.SeedBrokers(cfg.BootstrapBrokers...),
 		kgo.FetchMaxWait(sp.cfg.ReqTimeout),
 	}
@@ -449,7 +397,7 @@ func (sp *SourcePool) initConsumer(cfg ConsumerCfg) (*kgo.Client, error) {
 		return nil, err
 	}
 
-	if err := testConnection(cl, cfg.SessionTimeout, sp.srcTopics, nil); err != nil {
+	if err := testConnection(cl, cfg.SessionTimeout, []string{sp.topic.SourceTopic}, nil); err != nil {
 		return nil, err
 	}
 
@@ -506,6 +454,7 @@ func (sp *SourcePool) getCurCandidate() (Server, error) {
 		return sp.curCandidate, ErrorNoHealthy
 	}
 
+	sp.lastSentID = sp.curCandidate.ID
 	return sp.curCandidate, nil
 }
 
