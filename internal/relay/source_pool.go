@@ -272,7 +272,7 @@ func (sp *SourcePool) healthcheck(ctx context.Context, signal chan struct{}) err
 			// Fetch offset counts for each server.
 			wg := &sync.WaitGroup{}
 
-			curServerWeight := unhealthyWeight
+			currActiveWeight := unhealthyWeight
 			for i, s := range servers {
 				sp.log.Debug("running background health check", "id", s.ID, "server", s.Config.BootstrapBrokers)
 
@@ -322,8 +322,8 @@ func (sp *SourcePool) healthcheck(ctx context.Context, signal chan struct{}) err
 					// Adjust the global health of the servers.
 					sp.setWeight(servers[idx].ID, weight)
 
-					if servers[idx].ID == sp.curCandidate.ID {
-						curServerWeight = weight
+					if servers[idx].ID == sp.lastSentID {
+						currActiveWeight = weight
 					}
 				}(i, s)
 			}
@@ -332,16 +332,21 @@ func (sp *SourcePool) healthcheck(ctx context.Context, signal chan struct{}) err
 			// Now that offsets/weights for all servers are fetched, check if the current server
 			// is lagging beyond the threshold.
 			for _, s := range servers {
-				if sp.curCandidate.ID == s.ID {
+				// If the current server is now unhealthy skip checking for lag since we're in the
+				// process of picking a new candidate.
+				if sp.lastSentID == s.ID || currActiveWeight == unhealthyWeight {
 					continue
 				}
 
-				if s.Weight-curServerWeight > sp.cfg.LagThreshold {
-					sp.log.Error("current server's lag threshold exceeded. Marking as unhealthy.", "id", s.ID, "server", s.Config.BootstrapBrokers, "diff", s.Weight-curServerWeight > sp.cfg.LagThreshold, "threshold", sp.cfg.LagThreshold)
+				sp.log.Debug("checking current server's lag", "id", s.ID, "server", s.Config.BootstrapBrokers, "s.weight", s.Weight, "curr", currActiveWeight, "diff", s.Weight-currActiveWeight, "threshold", sp.cfg.LagThreshold)
+				if s.Weight-currActiveWeight > sp.cfg.LagThreshold {
+					sp.log.Error("current server's lag threshold exceeded. Marking as unhealthy.", "id", s.ID, "server", s.Config.BootstrapBrokers, "diff", s.Weight-currActiveWeight > sp.cfg.LagThreshold, "threshold", sp.cfg.LagThreshold)
 					sp.setWeight(s.ID, unhealthyWeight)
 
 					// Cancel any active fetches.
-					sp.cancelFetch()
+					if sp.cancelFetch != nil {
+						sp.cancelFetch()
+					}
 
 					// Signal the relay poll loop to start asking for a healthy client.
 					// The push is non-blocking to avoid getting stuck trying to send on the poll loop
@@ -364,6 +369,7 @@ func (sp *SourcePool) initConsumer(cfg ConsumerCfg) (*kgo.Client, error) {
 		cp[p] = kgo.NewOffset().At(o.EpochOffset().Offset)
 	}
 
+	sp.log.Info("initializing new source consumer", "offsets", cp, "brokers", cfg.BootstrapBrokers)
 	opts := []kgo.Opt{
 		kgo.ConsumePartitions(map[string]map[int32]kgo.Offset{sp.topic.SourceTopic: cp}),
 		kgo.SeedBrokers(cfg.BootstrapBrokers...),

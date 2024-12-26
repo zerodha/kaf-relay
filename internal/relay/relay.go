@@ -3,6 +3,7 @@ package relay
 import (
 	"context"
 	"log/slog"
+	"strconv"
 	"sync"
 	"time"
 
@@ -267,8 +268,13 @@ func (re *Relay) processMessage(ctx context.Context, rec *kgo.Record) error {
 		}
 	}
 
+	// Pass the src message time as a meta header to the target.
+	// The target consumer can check the lag between the src and target message time if required.
 	// Repurpose &kgo.Record and forward it to producer to reduce allocs.
-	rec.Headers = nil
+	rec.Headers = []kgo.RecordHeader{{
+		Key:   "t",
+		Value: nsToBytes(rec.Timestamp.UnixNano()),
+	}}
 	rec.Timestamp = time.Time{}
 	rec.Topic = re.topic.TargetTopic
 	if !re.topic.AutoTargetPartition {
@@ -320,4 +326,10 @@ func (re *Relay) hasReachedEnd() bool {
 		}
 	}
 	return true
+}
+
+func nsToBytes(ns int64) []byte {
+	// Preallocate a buffer for the byte slice
+	buf := make([]byte, 0, 10) // 10 is enough for most integers
+	return strconv.AppendInt(buf, ns, 10)
 }
