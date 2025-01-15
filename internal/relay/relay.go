@@ -268,13 +268,13 @@ func (re *Relay) processMessage(ctx context.Context, rec *kgo.Record) error {
 		}
 	}
 
-	// Pass the src message time as a meta header to the target.
+	// Add the src message time as a meta header to the target.
 	// The target consumer can check the lag between the src and target message time if required.
 	// Repurpose &kgo.Record and forward it to producer to reduce allocs.
-	rec.Headers = []kgo.RecordHeader{{
-		Key:   "t",
+	rec.Headers = append(rec.Headers, kgo.RecordHeader{
+		Key:   "_t",
 		Value: nsToBytes(rec.Timestamp.UnixNano()),
-	}}
+	})
 	rec.Timestamp = time.Time{}
 	rec.Topic = re.topic.TargetTopic
 	if !re.topic.AutoTargetPartition {
