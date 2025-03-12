@@ -308,7 +308,7 @@ func getHighWatermark(ctx context.Context, client *kgo.Client, topics []string, 
 	adm := kadm.NewClient(client)
 	offsets, err := adm.ListEndOffsets(ctx, topics...)
 	if err != nil {
-		return nil, fmt.Errorf("error listing end offsets of topics(%v): %v", topics, err)
+		return nil, fmt.Errorf("error listing end offsets of topic(%v): %v", topics, err)
 	}
 
 	return offsets, nil

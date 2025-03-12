@@ -3,6 +3,7 @@ package relay
 import (
 	"context"
 	"log/slog"
+	"strconv"
 	"sync"
 	"time"
 
@@ -22,7 +23,7 @@ type Relay struct {
 	target *Target
 	log    *slog.Logger
 
-	topics Topics
+	topic Topic
 
 	// signalCh is used to signal when the relay poll loop should look for a new healthy server.
 	signalCh chan struct{}
@@ -33,13 +34,13 @@ type Relay struct {
 	targetOffsets TopicOffsets
 
 	// Live topic offsets from source.
-	srcOffsets map[string]map[int32]int64
+	srcOffsets map[int32]int64
 
 	// list of filter implementations for skipping messages
 	filters map[string]filter.Provider
 }
 
-func NewRelay(cfg RelayCfg, src *SourcePool, target *Target, topics Topics, filters map[string]filter.Provider, log *slog.Logger) (*Relay, error) {
+func NewRelay(cfg RelayCfg, src *SourcePool, target *Target, topic Topic, filters map[string]filter.Provider, log *slog.Logger) (*Relay, error) {
 	// If stop-at-end is set, fetch and cache the offsets to determine
 	// when end is reached.
 	var offsets TopicOffsets
@@ -47,7 +48,7 @@ func NewRelay(cfg RelayCfg, src *SourcePool, target *Target, topics Topics, filt
 		if o, err := target.GetHighWatermark(); err != nil {
 			return nil, err
 		} else {
-			offsets = o.KOffsets()
+			offsets = o.KOffsets()[topic.TargetTopic]
 		}
 	}
 
@@ -57,10 +58,10 @@ func NewRelay(cfg RelayCfg, src *SourcePool, target *Target, topics Topics, filt
 		target: target,
 		log:    log,
 
-		topics:   topics,
+		topic:    topic,
 		signalCh: make(chan struct{}, 1),
 
-		srcOffsets:    make(map[string]map[int32]int64),
+		srcOffsets:    make(map[int32]int64),
 		targetOffsets: offsets,
 		filters:       filters,
 	}
@@ -116,9 +117,6 @@ func (re *Relay) Start(globalCtx context.Context) error {
 		defer wg.Done()
 		// Wait till main ctx is cancelled.
 		<-ctx.Done()
-
-		// Stop consumer group.
-		re.source.Close()
 	}()
 
 	// Start the indefinite poll that asks for new connections
@@ -195,7 +193,12 @@ loop:
 						continue loop
 					}
 
-					re.cacheSrcOffsets(of)
+					srcOffsets := make(map[int32]int64)
+					of.Each(func(lo kadm.ListedOffset) {
+						srcOffsets[lo.Partition] = lo.Offset
+					})
+
+					re.cacheSrcOffsets(srcOffsets)
 					firstPoll = false
 				}
 
@@ -237,7 +240,6 @@ loop:
 			}
 
 			re.log.Debug("processed fetches")
-			server.Client.AllowRebalance()
 		}
 	}
 }
@@ -246,7 +248,7 @@ loop:
 func (re *Relay) processMessage(ctx context.Context, rec *kgo.Record) error {
 	// Decrement the end offsets for the given topic and partition till we reach 0
 	if re.cfg.StopAtEnd {
-		re.decrementSourceOffset(rec.Topic, rec.Partition)
+		re.decrementSourceOffset(rec.Partition)
 	}
 
 	// If there are filters, run the message through them to decide whether
@@ -266,17 +268,17 @@ func (re *Relay) processMessage(ctx context.Context, rec *kgo.Record) error {
 		}
 	}
 
-	t, ok := re.topics[rec.Topic]
-	if !ok {
-		return nil
-	}
-
+	// Add the src message time as a meta header to the target.
+	// The target consumer can check the lag between the src and target message time if required.
 	// Repurpose &kgo.Record and forward it to producer to reduce allocs.
-	rec.Headers = nil
+	rec.Headers = append(rec.Headers, kgo.RecordHeader{
+		Key:   "_t",
+		Value: nsToBytes(rec.Timestamp.UnixNano()),
+	})
 	rec.Timestamp = time.Time{}
-	rec.Topic = t.TargetTopic
-	if !t.AutoTargetPartition {
-		rec.Partition = int32(t.TargetPartition)
+	rec.Topic = re.topic.TargetTopic
+	if !re.topic.AutoTargetPartition {
+		rec.Partition = int32(re.topic.TargetPartition)
 	}
 	rec.Attrs = kgo.RecordAttrs{}
 	rec.ProducerEpoch = 0
@@ -299,47 +301,35 @@ func (re *Relay) processMessage(ctx context.Context, rec *kgo.Record) error {
 }
 
 // decrementSourceOffset decrements the offset count for the given topic and partition in the source offsets map.
-func (re *Relay) decrementSourceOffset(topic string, partition int32) {
-	if o, ok := re.srcOffsets[topic]; ok {
-		if offset, found := o[partition]; found && offset > 0 {
-			o[partition]--
-			re.srcOffsets[topic] = o
-		}
+func (re *Relay) decrementSourceOffset(partition int32) {
+	if offset, found := re.srcOffsets[partition]; found && offset > 0 {
+		re.srcOffsets[partition] -= 1
 	}
 }
 
 // cacheSrcOffsets sets the end offsets of the consumer during bootup to exit on consuming everything.
-func (re *Relay) cacheSrcOffsets(of kadm.ListedOffsets) {
-	of.Each(func(lo kadm.ListedOffset) {
-		ct, ok := re.srcOffsets[lo.Topic]
-		if !ok {
-			ct = make(map[int32]int64)
-		}
-		ct[lo.Partition] = lo.Offset
-		re.srcOffsets[lo.Topic] = ct
-	})
-
+func (re *Relay) cacheSrcOffsets(of map[int32]int64) {
+	re.srcOffsets = of
 	// Read till the destination offsets and reduce it from the target weight.
-	for t, po := range re.targetOffsets {
-		for p, o := range po {
-			if ct, ok := re.srcOffsets[t]; ok {
-				if _, found := ct[p]; found {
-					re.srcOffsets[t][p] -= o.EpochOffset().Offset
-				}
-			}
+	for p, o := range re.targetOffsets {
+		if _, ok := re.srcOffsets[p]; ok {
+			re.srcOffsets[p] -= o.EpochOffset().Offset
 		}
 	}
 }
 
 // hasReachedEnd reports if there is any pending messages in given topic-partition.
 func (re *Relay) hasReachedEnd() bool {
-	for _, p := range re.srcOffsets {
-		for _, o := range p {
-			if o > 0 {
-				return false
-			}
+	for _, o := range re.srcOffsets {
+		if o > 0 {
+			return false
 		}
 	}
-
 	return true
+}
+
+func nsToBytes(ns int64) []byte {
+	// Preallocate a buffer for the byte slice
+	buf := make([]byte, 0, 10) // 10 is enough for most integers
+	return strconv.AppendInt(buf, ns, 10)
 }
