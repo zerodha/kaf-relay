@@ -166,7 +166,10 @@ loop:
 				out := s
 				out.Client = conn
 
+				// Lock because sp.cancelFetch could be accessed by healthcheck() goroutine.
+				sp.Lock()
 				sp.fetchCtx, sp.cancelFetch = context.WithCancel(globalCtx)
+				sp.Unlock()
 				return &out, nil
 			}
 
@@ -304,8 +307,15 @@ func (sp *SourcePool) healthcheck(ctx context.Context, signal chan struct{}) err
 						sp.setWeight(servers[idx].ID, unhealthyWeight)
 						// If the current candidate is no longer healthy,
 						// signal relay to stop polling it.
-						if s.ID == sp.lastSentID && sp.cancelFetch != nil {
-							sp.cancelFetch()
+						sp.Lock()
+						var (
+							shouldCancel = s.ID == sp.lastSentID
+							cancelFn     = sp.cancelFetch
+						)
+						sp.Unlock()
+
+						if shouldCancel && cancelFn != nil {
+							cancelFn()
 						}
 
 						return
@@ -322,9 +332,11 @@ func (sp *SourcePool) healthcheck(ctx context.Context, signal chan struct{}) err
 					// Adjust the global health of the servers.
 					sp.setWeight(servers[idx].ID, weight)
 
+					sp.Lock()
 					if servers[idx].ID == sp.lastSentID {
 						currActiveWeight = weight
 					}
+					sp.Unlock()
 				}(i, s)
 			}
 			wg.Wait()
@@ -334,7 +346,10 @@ func (sp *SourcePool) healthcheck(ctx context.Context, signal chan struct{}) err
 			for _, s := range servers {
 				// If the current server is now unhealthy skip checking for lag since we're in the
 				// process of picking a new candidate.
-				if sp.lastSentID == s.ID || currActiveWeight == unhealthyWeight {
+				sp.Lock()
+				lastSent := sp.lastSentID
+				sp.Unlock()
+				if lastSent == s.ID || currActiveWeight == unhealthyWeight {
 					continue
 				}
 
@@ -344,8 +359,11 @@ func (sp *SourcePool) healthcheck(ctx context.Context, signal chan struct{}) err
 					sp.setWeight(s.ID, unhealthyWeight)
 
 					// Cancel any active fetches.
-					if sp.cancelFetch != nil {
-						sp.cancelFetch()
+					sp.Lock()
+					cancelFn := sp.cancelFetch
+					sp.Unlock()
+					if cancelFn != nil {
+						cancelFn()
 					}
 
 					// Signal the relay poll loop to start asking for a healthy client.
