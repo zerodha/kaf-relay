@@ -276,6 +276,9 @@ func (re *Relay) processMessage(ctx context.Context, rec *kgo.Record) error {
 		Value: nsToBytes(rec.Timestamp.UnixNano()),
 	})
 	rec.Timestamp = time.Time{}
+
+	// The incoming topic and partition are overwritten to the target topic and partition as the
+	// same kgo.Record is reused in the target for publishing.
 	rec.Topic = re.topic.TargetTopic
 	if !re.topic.AutoTargetPartition {
 		rec.Partition = int32(re.topic.TargetPartition)
