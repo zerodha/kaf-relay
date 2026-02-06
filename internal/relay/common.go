@@ -86,8 +86,8 @@ func getAckPolicy(ack string) kgo.Acks {
 	}
 }
 
-// testConnection tests if the connection is active or not; Also confirms the existence of topics
-func testConnection(client *kgo.Client, timeout time.Duration, topics []string, partitions map[string]uint) error {
+// validateConn tests if the connection is active or not; Also confirms the existence of topics
+func validateConn(client *kgo.Client, timeout time.Duration, topics []string, partitions map[string]uint) error {
 	if timeout == 0 {
 		timeout = 15 * time.Second
 	}
