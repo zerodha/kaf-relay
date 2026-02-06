@@ -101,7 +101,8 @@ client_key_path = ""
 client_cert_path = ""
 ca_cert_path = ""
 
-# -1 for infinite.
+# -1 for infinite. For long-running daemon relays, this should be set to -1 (indefinite),
+# otherwise, after exhausting retries, the relay will exit.
 max_retries = -1
 flush_batch_size = 1000
 batch_size = 1000

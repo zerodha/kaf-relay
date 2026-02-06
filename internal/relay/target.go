@@ -106,6 +106,8 @@ func (tg *Target) Start() error {
 
 			tg.batch = append(tg.batch, msg)
 			if len(tg.batch) >= tg.pCfg.FlushBatchSize {
+				// flush() will only return an error if the retries are exhausted, at which point, the relay will exit.
+				// This is configured [target].max_retries. For long-standing daemon relays, this shoul be set to -1 (indefinite).
 				if err := tg.flush(ctx); err != nil {
 					return err
 				}
@@ -250,7 +252,9 @@ func (tg *Target) drain() error {
 	return nil
 }
 
-// flush flushes the Producer batch to kafka and updates the topic offsets.
+// flush flushes the Producer batch to kafka and updates the topic offsets. It will only return
+// an error if the retries are exhausted, at which point, the relay will exit. This is configured
+// in [target].max_retries. For long-standing daemon relays, this shoul be set to -1 (indefinite).
 func (tg *Target) flush(ctx context.Context) error {
 	var (
 		retries = 0
