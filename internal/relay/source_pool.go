@@ -421,7 +421,8 @@ func (sp *SourcePool) initConsumer(cfg ConsumerCfg) (*kgo.Client, error) {
 		return nil, err
 	}
 
-	if err := testConnection(cl, cfg.SessionTimeout, []string{sp.topic.SourceTopic}, nil); err != nil {
+	if err := validateConn(cl, cfg.SessionTimeout, []string{sp.topic.SourceTopic}, nil); err != nil {
+		cl.Close()
 		return nil, err
 	}
 

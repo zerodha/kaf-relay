@@ -211,7 +211,9 @@ outerLoop:
 			}
 
 			// Test connectivity and ensure destination topics exists.
-			if err := testConnection(cl, tg.pCfg.SessionTimeout, topics, partitions); err != nil {
+			if err := validateConn(cl, tg.pCfg.SessionTimeout, topics, partitions); err != nil {
+				cl.Close()
+
 				tg.metrics.GetOrCreateCounter(fmt.Sprintf(TargetNetworkErrMetric, "error connecting to producer")).Inc()
 				tg.log.Error("error connecting to producer", "err", err)
 				retries++
