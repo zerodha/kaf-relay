@@ -29,7 +29,8 @@ type Target struct {
 	log     *slog.Logger
 
 	// Map of target topics and their config.
-	targetTopics Topics
+	topicsSrcToTarget Topics
+	topicsTargetToSrc Topics
 
 	// Inlet receives relayed messages into target for batching
 	inletCh chan *kgo.Record
@@ -41,15 +42,21 @@ type Target struct {
 // NewTarget returns a new producer relay that handles target Kafka instances.
 func NewTarget(globalCtx context.Context, cfg TargetCfg, pCfg ProducerCfg, topics Topics, m *metrics.Set, log *slog.Logger) (*Target, error) {
 	p := &Target{
-		cfg:          cfg,
-		pCfg:         pCfg,
-		ctx:          globalCtx,
-		metrics:      m,
-		log:          log,
-		targetTopics: topics,
+		cfg:               cfg,
+		pCfg:              pCfg,
+		ctx:               globalCtx,
+		metrics:           m,
+		log:               log,
+		topicsSrcToTarget: topics,
 
 		batch:   make([]*kgo.Record, 0, pCfg.BatchSize),
 		inletCh: make(chan *kgo.Record, pCfg.BufferSize),
+	}
+
+	// Reverse the topics map to look up source topics from target topics for metrics.
+	p.topicsTargetToSrc = make(Topics)
+	for _, t := range topics {
+		p.topicsTargetToSrc[t.TargetTopic] = t
 	}
 
 	// Initialize the actual Kafka client.
@@ -129,7 +136,7 @@ func (tg *Target) Start() error {
 // GetHighWatermark returns the offsets on the target topics.
 func (tg *Target) GetHighWatermark() (kadm.ListedOffsets, error) {
 	var out []string
-	for _, t := range tg.targetTopics {
+	for _, t := range tg.topicsSrcToTarget {
 		out = append(out, t.TargetTopic)
 	}
 
@@ -300,11 +307,10 @@ retry:
 			}
 
 			var (
-				srcTopic  = res.Record.Topic
-				destTopic = tg.targetTopics[res.Record.Topic]
-				part      = res.Record.Partition
+				t    = tg.topicsTargetToSrc[res.Record.Topic]
+				part = res.Record.Partition
 			)
-			tg.metrics.GetOrCreateCounter(fmt.Sprintf(RelayedMsgsMetric, srcTopic, part, destTopic.TargetTopic, destTopic.TargetPartition)).Inc()
+			tg.metrics.GetOrCreateCounter(fmt.Sprintf(RelayedMsgsMetric, t.SourceTopic, part, t.TargetTopic, t.TargetPartition)).Inc()
 		}
 
 		tg.log.Debug("produced last offset", "offset", results[len(results)-1].Record.Offset, "batch", batchLen, "retry", retries)
