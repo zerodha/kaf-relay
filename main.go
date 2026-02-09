@@ -95,7 +95,7 @@ func main() {
 
 			// Initialize the Relay which orchestrates consumption from the sourcePool
 			// and writing to the target pool.
-			relay, err := relay.NewRelay(initRelayConfig(ko), srcPool, target, topic, filters, lo)
+			relay, err := relay.NewRelay(initRelayConfig(ko), srcPool, target, topic, filters, metr, lo)
 			if err != nil {
 				log.Fatalf("error initializing relay controller: %v", err)
 			}

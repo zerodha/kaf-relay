@@ -8,6 +8,7 @@ import (
 	"math/rand"
 	"net"
 	"os"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -22,18 +23,65 @@ import (
 
 const relayMetricPrefix = "kafka_relay_"
 
+// Base metric names.
+const (
+	metricSourceErrors      = "source_errors_total"
+	metricSourceUnhealthy   = "source_unhealthy_total"
+	metricSourceKafkaErrors = "source_kafka_errors_total"
+	metricSourceHighwater   = "source_highwatermark"
+	metricTargetErrors      = "target_errors_total"
+	metricTargetKafkaErrors = "target_kafka_errors_total"
+	metricMsgsRelayed       = "messages_relayed_total"
+
+	metricFilteredMsgs         = "messages_filtered_total"
+	metricInletBlocks          = "target_inlet_blocks_total"
+	metricFlushBatchSize       = "target_flush_batch_size"
+	metricFlushDuration        = "target_flush_duration_seconds"
+	metricFlushRetries         = "target_flush_retries_total"
+	metricCandidateSwitches    = "source_candidate_switches_total"
+	metricSourceConnections    = "source_connections_total"
+	metricLagThresholdExceeded = "source_lag_threshold_exceeded_total"
+)
+
+// Canonical error label values.
+const (
+	errConnectionFailed   = "connection_failed"
+	errClientClosed       = "client_closed"
+	errFetch              = "fetch_error"
+	errTLSConfig          = "tls_config_error"
+	errClientCreation     = "client_creation_failed"
+	errProducerConnection = "connection_failed"
+	errProduce            = "produce_failed"
+	errProduceRetries     = "produce_retries_exhausted"
+)
+
 var (
-	SrcNetworkErrMetric = relayMetricPrefix + "source_errors_total{node_id=\"%d\", error=\"%s\"}"
-	SrcsUnhealthyMetric = relayMetricPrefix + "sources_unhealthy_total"
-	SrcKafkaErrMetric   = relayMetricPrefix + "source_kafka_errors_total{node_id=\"%d\", error=\"%s\"}"
-	SrcHealthMetric     = relayMetricPrefix + "source_highwatermark{node_id=\"%d\"}"
-
-	TargetNetworkErrMetric = relayMetricPrefix + "target_errors_total{error=\"%s\"}"
-	TargetKafkaErrMetric   = relayMetricPrefix + "target_kafka_errors_total{error=\"%s\"}"
-	RelayedMsgsMetric      = relayMetricPrefix + "msgs_total{source=\"%s\", src_partition=\"%d\", destination=\"%s\", dest_partition=\"%d\"}"
-
 	ErrLaggingBehind = fmt.Errorf("topic end offset is lagging behind")
 )
+
+// metricName builds a Prometheus metric name with optional labels.
+func metricName(base string, labels ...string) string {
+	if len(labels) == 0 {
+		return relayMetricPrefix + base
+	}
+
+	var b strings.Builder
+	b.WriteString(relayMetricPrefix)
+	b.WriteString(base)
+	b.WriteByte('{')
+	for i := 0; i < len(labels); i += 2 {
+		if i > 0 {
+			b.WriteByte(',')
+		}
+		b.WriteString(labels[i])
+		b.WriteString(`="`)
+		b.WriteString(labels[i+1])
+		b.WriteByte('"')
+	}
+	b.WriteByte('}')
+
+	return b.String()
+}
 
 const (
 	SASLMechanismPlain       = "PLAIN"

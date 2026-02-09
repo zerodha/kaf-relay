@@ -4,12 +4,71 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strconv"
+	"sync"
 	"time"
 
 	"github.com/VictoriaMetrics/metrics"
 	"github.com/twmb/franz-go/pkg/kadm"
 	"github.com/twmb/franz-go/pkg/kgo"
 )
+
+type targetMetrics struct {
+	networkErrClientCreation *metrics.Counter
+	networkErrConnection     *metrics.Counter
+	kafkaErrTLS              *metrics.Counter
+	kafkaErrProduce          *metrics.Counter
+	kafkaErrProduceRetries   *metrics.Counter
+	flushBatchSize           *metrics.Histogram
+	flushDuration            *metrics.Histogram
+	flushRetries             *metrics.Counter
+
+	// Lazy-cached per topic-partition relay counters.
+	relayed   map[string]*metrics.Counter
+	relayedMu sync.RWMutex
+	set       *metrics.Set
+}
+
+func newTargetMetrics(set *metrics.Set) targetMetrics {
+	return targetMetrics{
+		networkErrClientCreation: set.GetOrCreateCounter(metricName(metricTargetErrors, "error", errClientCreation)),
+		networkErrConnection:     set.GetOrCreateCounter(metricName(metricTargetErrors, "error", errProducerConnection)),
+		kafkaErrTLS:              set.GetOrCreateCounter(metricName(metricTargetKafkaErrors, "error", errTLSConfig)),
+		kafkaErrProduce:          set.GetOrCreateCounter(metricName(metricTargetKafkaErrors, "error", errProduce)),
+		kafkaErrProduceRetries:   set.GetOrCreateCounter(metricName(metricTargetKafkaErrors, "error", errProduceRetries)),
+		flushBatchSize:           set.GetOrCreateHistogram(metricName(metricFlushBatchSize)),
+		flushDuration:            set.GetOrCreateHistogram(metricName(metricFlushDuration)),
+		flushRetries:             set.GetOrCreateCounter(metricName(metricFlushRetries)),
+		relayed:                  make(map[string]*metrics.Counter),
+		set:                      set,
+	}
+}
+
+func (tm *targetMetrics) incRelayed(srcTopic string, srcPartition int32, tgtTopic string, tgtPartition uint) {
+	key := srcTopic + ":" + strconv.Itoa(int(srcPartition)) + ":" + tgtTopic + ":" + strconv.FormatUint(uint64(tgtPartition), 10)
+
+	tm.relayedMu.RLock()
+	c, ok := tm.relayed[key]
+	tm.relayedMu.RUnlock()
+	if ok {
+		c.Inc()
+		return
+	}
+
+	tm.relayedMu.Lock()
+	c, ok = tm.relayed[key]
+	if !ok {
+		c = tm.set.GetOrCreateCounter(metricName(metricMsgsRelayed,
+			"source_topic", srcTopic,
+			"source_partition", strconv.Itoa(int(srcPartition)),
+			"target_topic", tgtTopic,
+			"target_partition", strconv.FormatUint(uint64(tgtPartition), 10),
+		))
+		tm.relayed[key] = c
+	}
+	tm.relayedMu.Unlock()
+	c.Inc()
+}
 
 // TargetCfg is the producer/target Kafka config.
 type TargetCfg struct {
@@ -21,12 +80,12 @@ type TargetCfg struct {
 
 // Target is a holder for the kafka Target client.
 type Target struct {
-	client  *kgo.Client
-	cfg     TargetCfg
-	pCfg    ProducerCfg
-	ctx     context.Context
-	metrics *metrics.Set
-	log     *slog.Logger
+	client *kgo.Client
+	cfg    TargetCfg
+	pCfg   ProducerCfg
+	ctx    context.Context
+	metr   targetMetrics
+	log    *slog.Logger
 
 	// Map of target topics and their config.
 	topicsSrcToTarget Topics
@@ -45,7 +104,7 @@ func NewTarget(globalCtx context.Context, cfg TargetCfg, pCfg ProducerCfg, topic
 		cfg:               cfg,
 		pCfg:              pCfg,
 		ctx:               globalCtx,
-		metrics:           m,
+		metr:              newTargetMetrics(m),
 		log:               log,
 		topicsSrcToTarget: topics,
 
@@ -173,7 +232,7 @@ func (tg *Target) initProducer(top Topics) (*kgo.Client, error) {
 		} else {
 			tlsOpt, err := getTLSConfig(tg.pCfg.CACertPath, tg.pCfg.ClientCertPath, tg.pCfg.ClientKeyPath)
 			if err != nil {
-				tg.metrics.GetOrCreateCounter(fmt.Sprintf(TargetKafkaErrMetric, "tls config error")).Inc()
+				tg.metr.kafkaErrTLS.Inc()
 				return nil, err
 			}
 
@@ -198,7 +257,7 @@ outerLoop:
 		default:
 			cl, err = kgo.NewClient(opts...)
 			if err != nil {
-				tg.metrics.GetOrCreateCounter(fmt.Sprintf(TargetNetworkErrMetric, "error creating producer client")).Inc()
+				tg.metr.networkErrClientCreation.Inc()
 				tg.log.Error("error creating producer client", "error", err)
 				retries++
 				waitTries(tg.ctx, backoff(retries))
@@ -221,7 +280,7 @@ outerLoop:
 			if err := validateConn(cl, tg.pCfg.SessionTimeout, topics, partitions); err != nil {
 				cl.Close()
 
-				tg.metrics.GetOrCreateCounter(fmt.Sprintf(TargetNetworkErrMetric, "error connecting to producer")).Inc()
+				tg.metr.networkErrConnection.Inc()
 				tg.log.Error("error connecting to producer", "err", err)
 				retries++
 				waitTries(tg.ctx, backoff(retries))
@@ -265,6 +324,7 @@ func (tg *Target) drain() error {
 // an error if the retries are exhausted, at which point, the relay will exit. This is configured
 // in [target].max_retries. For long-standing daemon relays, this shoul be set to -1 (indefinite).
 func (tg *Target) flush(ctx context.Context) error {
+	start := time.Now()
 	var (
 		retries = 0
 		sent    bool
@@ -274,6 +334,7 @@ func (tg *Target) flush(ctx context.Context) error {
 retry:
 	for retries < tg.pCfg.MaxRetries || tg.pCfg.MaxRetries == IndefiniteRetry {
 		batchLen := len(tg.batch)
+		tg.metr.flushBatchSize.Update(float64(batchLen))
 
 		// check if the destination cluster is healthy before attempting to produce again.
 		if retries > 0 && !checkTCP(ctx, tg.pCfg.BootstrapBrokers, tg.pCfg.SessionTimeout) {
@@ -310,14 +371,14 @@ retry:
 				t    = tg.topicsTargetToSrc[res.Record.Topic]
 				part = res.Record.Partition
 			)
-			tg.metrics.GetOrCreateCounter(fmt.Sprintf(RelayedMsgsMetric, t.SourceTopic, part, t.TargetTopic, t.TargetPartition)).Inc()
+			tg.metr.incRelayed(t.SourceTopic, part, t.TargetTopic, t.TargetPartition)
 		}
 
 		tg.log.Debug("produced last offset", "offset", results[len(results)-1].Record.Offset, "batch", batchLen, "retry", retries)
 
 		// retry if there is an error
 		if err != nil {
-			tg.metrics.GetOrCreateCounter(fmt.Sprintf(TargetKafkaErrMetric, "error producing message")).Inc()
+			tg.metr.kafkaErrProduce.Inc()
 			tg.log.Error("error producing message", "err", err, "failed_count", batchLen, "retry", retries)
 
 			bufRecs := tg.client.BufferedProduceRecords()
@@ -333,6 +394,7 @@ retry:
 			tg.batch = tg.batch[:0]
 			tg.batch = failures
 			retries++
+			tg.metr.flushRetries.Inc()
 
 			// backoff retry
 			b := backOff(retries)
@@ -349,9 +411,10 @@ retry:
 	}
 
 	if !sent {
-		tg.metrics.GetOrCreateCounter(fmt.Sprintf(TargetKafkaErrMetric, "error producing message after retries")).Inc()
+		tg.metr.kafkaErrProduceRetries.Inc()
 		return fmt.Errorf("error producing message; exhausted retries (%v)", tg.pCfg.MaxRetries)
 	}
 
+	tg.metr.flushDuration.UpdateDuration(start)
 	return nil
 }

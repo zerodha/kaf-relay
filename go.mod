@@ -27,7 +27,7 @@ require (
 )
 
 require (
-	github.com/VictoriaMetrics/metrics v1.23.1
+	github.com/VictoriaMetrics/metrics v1.40.1
 	github.com/klauspost/compress v1.17.8 // indirect
 	github.com/twmb/franz-go/pkg/kadm v1.8.1
 	golang.org/x/crypto v0.23.0 // indirect

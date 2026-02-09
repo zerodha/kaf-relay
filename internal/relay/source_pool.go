@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"strconv"
 	"sync"
 	"time"
 
@@ -13,6 +14,41 @@ import (
 	"github.com/twmb/franz-go/pkg/kadm"
 	"github.com/twmb/franz-go/pkg/kgo"
 )
+
+type sourceNodeMetrics struct {
+	networkErrConnFailed *metrics.Counter
+	kafkaErrClientClosed *metrics.Counter
+	kafkaErrFetch        *metrics.Counter
+	highwatermark        *metrics.Gauge
+	connections          *metrics.Counter
+	lagThresholdExceeded *metrics.Counter
+}
+
+type sourceMetrics struct {
+	unhealthy         *metrics.Counter
+	candidateSwitches *metrics.Counter
+	nodes             map[int]*sourceNodeMetrics
+}
+
+func newSourceMetrics(set *metrics.Set, servers []Server) sourceMetrics {
+	sm := sourceMetrics{
+		unhealthy:         set.GetOrCreateCounter(metricName(metricSourceUnhealthy)),
+		candidateSwitches: set.GetOrCreateCounter(metricName(metricCandidateSwitches)),
+		nodes:             make(map[int]*sourceNodeMetrics, len(servers)),
+	}
+	for _, s := range servers {
+		id := strconv.Itoa(s.ID)
+		sm.nodes[s.ID] = &sourceNodeMetrics{
+			networkErrConnFailed: set.GetOrCreateCounter(metricName(metricSourceErrors, "node_id", id, "error", errConnectionFailed)),
+			kafkaErrClientClosed: set.GetOrCreateCounter(metricName(metricSourceKafkaErrors, "node_id", id, "error", errClientClosed)),
+			kafkaErrFetch:        set.GetOrCreateCounter(metricName(metricSourceKafkaErrors, "node_id", id, "error", errFetch)),
+			highwatermark:        set.GetOrCreateGauge(metricName(metricSourceHighwater, "node_id", id), nil),
+			connections:          set.GetOrCreateCounter(metricName(metricSourceConnections, "node_id", id)),
+			lagThresholdExceeded: set.GetOrCreateCounter(metricName(metricLagThresholdExceeded, "node_id", id)),
+		}
+	}
+	return sm
+}
 
 type SourcePoolCfg struct {
 	HealthCheckInterval time.Duration
@@ -49,9 +85,9 @@ type TopicOffsets map[int32]kgo.Offset
 
 // SourcePool manages the source Kafka instances and consumption.
 type SourcePool struct {
-	cfg     SourcePoolCfg
-	log     *slog.Logger
-	metrics *metrics.Set
+	cfg  SourcePoolCfg
+	log  *slog.Logger
+	metr sourceMetrics
 
 	// targetOffsets is initialized with current topic high watermarks from target.
 	// These are updated whenever new msgs from src are sent to target for producing.
@@ -106,7 +142,7 @@ func NewSourcePool(cfg SourcePoolCfg, serverCfgs []ConsumerCfg, topic Topic, tar
 		topic:     topic,
 		servers:   servers,
 		log:       log,
-		metrics:   m,
+		metr:      newSourceMetrics(m, servers),
 		backoffFn: getBackoffFn(cfg.EnableBackoff, cfg.BackoffMin, cfg.BackoffMax),
 	}
 
@@ -157,7 +193,7 @@ loop:
 				conn, err := sp.newConn(globalCtx, s)
 				if err != nil {
 					retries++
-					sp.metrics.GetOrCreateCounter(fmt.Sprintf(SrcNetworkErrMetric, s.ID, "new connection failed")).Inc()
+					sp.metr.nodes[s.ID].networkErrConnFailed.Inc()
 					sp.log.Error("new source connection failed", "id", s.ID, "broker", s.Config.BootstrapBrokers, "error", err, "retries", retries)
 					waitTries(globalCtx, sp.backoffFn(retries))
 					continue loop
@@ -165,6 +201,8 @@ loop:
 
 				out := s
 				out.Client = conn
+
+				sp.metr.nodes[s.ID].connections.Inc()
 
 				// Lock because sp.cancelFetch could be accessed by healthcheck() goroutine.
 				sp.Lock()
@@ -174,7 +212,7 @@ loop:
 			}
 
 			retries++
-			sp.metrics.GetOrCreateCounter(SrcsUnhealthyMetric).Inc()
+			sp.metr.unhealthy.Inc()
 			sp.log.Error("no healthy server found. waiting and retrying", "retries", retries, "error", err)
 			waitTries(globalCtx, sp.backoffFn(retries))
 		}
@@ -188,7 +226,7 @@ func (sp *SourcePool) GetFetches(s *Server) (kgo.Fetches, error) {
 
 	// There's no connection.
 	if fetches.IsClientClosed() {
-		sp.metrics.GetOrCreateCounter(fmt.Sprintf(SrcKafkaErrMetric, s.ID, "client closed")).Inc()
+		sp.metr.nodes[s.ID].kafkaErrClientClosed.Inc()
 		sp.log.Debug("retrieving fetches failed. client closed.", "id", s.ID, "broker", s.Config.BootstrapBrokers)
 		sp.setWeight(s.ID, unhealthyWeight)
 
@@ -197,7 +235,7 @@ func (sp *SourcePool) GetFetches(s *Server) (kgo.Fetches, error) {
 
 	// If there are errors in the fetches, handle them.
 	for _, err := range fetches.Errors() {
-		sp.metrics.GetOrCreateCounter(fmt.Sprintf(SrcKafkaErrMetric, s.ID, "fetches error")).Inc()
+		sp.metr.nodes[s.ID].kafkaErrFetch.Inc()
 		sp.log.Error("found error in fetches", "server", s.ID, "error", err.Err)
 		sp.setWeight(s.ID, unhealthyWeight)
 
@@ -356,6 +394,7 @@ func (sp *SourcePool) healthcheck(ctx context.Context, signal chan struct{}) err
 				sp.log.Debug("checking current server's lag", "id", s.ID, "server", s.Config.BootstrapBrokers, "s.weight", s.Weight, "curr", currActiveWeight, "diff", s.Weight-currActiveWeight, "threshold", sp.cfg.LagThreshold)
 				if s.Weight-currActiveWeight > sp.cfg.LagThreshold {
 					sp.log.Error("current server's lag threshold exceeded. Marking as unhealthy.", "id", s.ID, "server", s.Config.BootstrapBrokers, "diff", s.Weight-currActiveWeight > sp.cfg.LagThreshold, "threshold", sp.cfg.LagThreshold)
+					sp.metr.nodes[s.ID].lagThresholdExceeded.Inc()
 					sp.setWeight(s.ID, unhealthyWeight)
 
 					// Cancel any active fetches.
@@ -505,7 +544,7 @@ func (sp *SourcePool) setWeight(id int, weight int64) {
 			sp.curCandidate = s
 		}
 
-		sp.metrics.GetOrCreateCounter(fmt.Sprintf(SrcHealthMetric, id)).Set(uint64(weight))
+		sp.metr.nodes[id].highwatermark.Set(float64(weight))
 		sp.log.Debug("setting candidate weight", "id", id, "weight", weight, "curr", sp.curCandidate)
 		sp.servers[id] = s
 		break
