@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/VictoriaMetrics/metrics"
 	"github.com/twmb/franz-go/pkg/kadm"
 	"github.com/twmb/franz-go/pkg/kgo"
 	"github.com/zerodha/kaf-relay/filter"
@@ -18,10 +19,11 @@ type RelayCfg struct {
 
 // Relay represents the input, output kafka and the remapping necessary to forward messages from one topic to another.
 type Relay struct {
-	cfg    RelayCfg
-	source *SourcePool
-	target *Target
-	log    *slog.Logger
+	cfg     RelayCfg
+	source  *SourcePool
+	target  *Target
+	metrics *metrics.Set
+	log     *slog.Logger
 
 	topic Topic
 
@@ -40,7 +42,7 @@ type Relay struct {
 	filters map[string]filter.Provider
 }
 
-func NewRelay(cfg RelayCfg, src *SourcePool, target *Target, topic Topic, filters map[string]filter.Provider, log *slog.Logger) (*Relay, error) {
+func NewRelay(cfg RelayCfg, src *SourcePool, target *Target, topic Topic, filters map[string]filter.Provider, m *metrics.Set, log *slog.Logger) (*Relay, error) {
 	// If stop-at-end is set, fetch and cache the offsets to determine
 	// when end is reached.
 	var offsets TopicOffsets
@@ -53,10 +55,11 @@ func NewRelay(cfg RelayCfg, src *SourcePool, target *Target, topic Topic, filter
 	}
 
 	r := &Relay{
-		cfg:    cfg,
-		source: src,
-		target: target,
-		log:    log,
+		cfg:     cfg,
+		source:  src,
+		target:  target,
+		metrics: m,
+		log:     log,
 
 		topic:    topic,
 		signalCh: make(chan struct{}, 1),
@@ -151,6 +154,7 @@ loop:
 			return ctx.Err()
 
 		case <-re.signalCh:
+			re.metrics.GetOrCreateCounter(metricName(metricCandidateSwitches)).Inc()
 			re.log.Info("poll loop received unhealthy signal. requesting new node")
 
 			for {
@@ -258,6 +262,7 @@ func (re *Relay) processMessage(ctx context.Context, rec *kgo.Record) error {
 		for n, f := range re.filters {
 			if !f.IsAllowed(rec.Value) {
 				re.log.Debug("filtering message", "message", string(rec.Value), "filter", n)
+				re.metrics.GetOrCreateCounter(metricName(metricFilteredMsgs, "filter", n)).Inc()
 				ok = false
 				break
 			}
@@ -296,6 +301,7 @@ func (re *Relay) processMessage(ctx context.Context, rec *kgo.Record) error {
 		return ctx.Err()
 	case re.target.GetBatchCh() <- rec:
 	default:
+		re.metrics.GetOrCreateCounter(metricName(metricInletBlocks)).Inc()
 		re.log.Error("target inlet channel blocked")
 		re.target.GetBatchCh() <- rec
 	}
