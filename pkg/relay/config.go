@@ -47,6 +47,14 @@ type ConsumerCfg struct {
 	KafkaCfg `koanf:",squash"`
 }
 
+// TargetCfg is the target/writer config (backoff, timeouts).
+type TargetCfg struct {
+	ReqTimeout    time.Duration
+	EnableBackoff bool
+	BackoffMin    time.Duration
+	BackoffMax    time.Duration
+}
+
 // ProducerCfg is the Kafka producer config.
 type ProducerCfg struct {
 	KafkaCfg `koanf:",squash"`

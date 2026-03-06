@@ -12,7 +12,8 @@ import (
 
 	"github.com/VictoriaMetrics/metrics"
 	"github.com/knadh/koanf/v2"
-	"github.com/zerodha/kaf-relay/internal/relay"
+	"github.com/zerodha/kaf-relay/pkg/kafkatarget"
+	"github.com/zerodha/kaf-relay/pkg/relay"
 )
 
 var (
@@ -71,18 +72,17 @@ func main() {
 			// Start the relay. This is an indefinitely blocking call.
 			defer wg.Done()
 
-			target, err := relay.NewTarget(globalCtx, initTargetConfig(ko), prodConfig, topics, metr, lo)
+			target, err := kafkatarget.New(initTargetConfig(ko), prodConfig, topics, globalCtx, metr, lo)
 			if err != nil {
 				log.Fatalf("error initializing target controller: %v", err)
 			}
 
-			hOf, err := target.GetHighWatermark()
+			offsets, err := target.GetHighWatermark(globalCtx)
 			if err != nil {
 				log.Fatalf("error getting destination high watermark: %v", err)
 			}
 
-			targetOffsets := hOf.KOffsets()
-			hw, ok := targetOffsets[topic.TargetTopic]
+			hw, ok := offsets[topic.TargetTopic]
 			if !ok {
 				log.Fatalf("error fetching end offset for target topic %s", topic.TargetTopic)
 			}
@@ -95,12 +95,12 @@ func main() {
 
 			// Initialize the Relay which orchestrates consumption from the sourcePool
 			// and writing to the target pool.
-			relay, err := relay.NewRelay(initRelayConfig(ko), srcPool, target, topic, filters, metr, lo)
+			r, err := relay.NewRelay(initRelayConfig(ko), srcPool, target, topic, filters, metr, lo)
 			if err != nil {
 				log.Fatalf("error initializing relay controller: %v", err)
 			}
 
-			if err := relay.Start(globalCtx); err != nil {
+			if err := r.Start(globalCtx); err != nil {
 				log.Fatalf("error starting relay controller: %v", err)
 			}
 		}()

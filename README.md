@@ -68,6 +68,110 @@ func (f *TestFilter) IsAllowed(msg []byte) bool {
 * Change the config.toml to add the filter provider config.
 * Run kaf-relay with the filter plugin. `./kaf-relay.bin --mode single --stop-at-end --filter ./testfilter/testfilter.filter`
 
+## Using as a library
+
+The `pkg/relay` and `pkg/kafkatarget` packages can be imported to build custom relay daemons. The builtin Kafka target can be swapped for any backend by implementing the `relay.Target` interface.
+
+Here is an example that shows a Redis target.
+
+```go
+package main
+
+import (
+	"context"
+	"fmt"
+	"log/slog"
+	"strconv"
+
+	"github.com/redis/go-redis/v9"
+	"github.com/zerodha/kaf-relay/pkg/relay"
+)
+
+const watermarkKey = "_watermark" // Redis hash: topic → partition → offset
+
+// RedisTarget implements relay.Target, writing messages to Redis streams
+// and tracking offsets in a Redis hash for resumption.
+type RedisTarget struct {
+	client *redis.Client
+	topic  string
+	log    *slog.Logger
+	stopCh chan struct{}
+	doneCh chan struct{}
+}
+
+func NewRedisTarget(addr, topic string, log *slog.Logger) *RedisTarget {
+	return &RedisTarget{
+		client: redis.NewClient(&redis.Options{Addr: addr}),
+		topic:  topic,
+		log:    log,
+		stopCh: make(chan struct{}),
+		doneCh: make(chan struct{}),
+	}
+}
+
+// GetHighWatermark reads persisted offsets from a Redis hash so the relay
+// can resume from where it left off.
+func (r *RedisTarget) GetHighWatermark(ctx context.Context) (relay.Offsets, error) {
+	vals, err := r.client.HGetAll(ctx, watermarkKey).Result()
+	if err != nil {
+		return nil, err
+	}
+
+	offsets := make(map[int32]int64, len(vals))
+	for field, val := range vals {
+		p, _ := strconv.Atoi(field)
+		o, _ := strconv.ParseInt(val, 10, 64)
+		offsets[int32(p)] = o
+	}
+
+	return relay.Offsets{r.topic: offsets}, nil
+}
+
+// Start blocks until Close() is called.
+func (r *RedisTarget) Start() error {
+	defer close(r.doneCh)
+	<-r.stopCh
+	return nil
+}
+
+// Write writes a message to Redis and updates the watermark offset.
+func (r *RedisTarget) Write(ctx context.Context, msg relay.Message) error {
+	pipe := r.client.Pipeline()
+
+	pipe.XAdd(ctx, &redis.XAddArgs{
+		Stream: msg.Topic,
+		Values: map[string]interface{}{
+			"key":   string(msg.Key),
+			"value": string(msg.Value),
+		},
+	})
+
+	// Persist the source offset so GetHighWatermark can resume from here.
+	pipe.HSet(ctx, watermarkKey, fmt.Sprintf("%d", msg.Partition), msg.Offset)
+
+	_, err := pipe.Exec(ctx)
+	return err
+}
+
+// Close signals Start() to return and waits for it, then closes the Redis client.
+func (r *RedisTarget) Close() error {
+	close(r.stopCh)
+	<-r.doneCh
+	return r.client.Close()
+}
+```
+
+Connect it to the relay.
+
+```go
+target := NewRedisTarget("localhost:6379", log)
+
+srcPool, _ := relay.NewSourcePool(poolCfg, consumerCfgs, topic, nil, metricsSet, log)
+
+r, _ := relay.NewRelay(relayCfg, srcPool, target, topic, nil, metricsSet, log)
+r.Start(ctx)
+```
+
 ## Metrics
 
 Replication metrics are exposed through a HTTP server.
