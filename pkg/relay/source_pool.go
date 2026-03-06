@@ -32,19 +32,19 @@ type sourceMetrics struct {
 
 func newSourceMetrics(set *metrics.Set, servers []Server) sourceMetrics {
 	sm := sourceMetrics{
-		unhealthy:         set.GetOrCreateCounter(metricName(metricSourceUnhealthy)),
-		candidateSwitches: set.GetOrCreateCounter(metricName(metricCandidateSwitches)),
+		unhealthy:         set.GetOrCreateCounter(MetricName(MetricSourceUnhealthy)),
+		candidateSwitches: set.GetOrCreateCounter(MetricName(MetricCandidateSwitches)),
 		nodes:             make(map[int]*sourceNodeMetrics, len(servers)),
 	}
 	for _, s := range servers {
 		id := strconv.Itoa(s.ID)
 		sm.nodes[s.ID] = &sourceNodeMetrics{
-			networkErrConnFailed: set.GetOrCreateCounter(metricName(metricSourceErrors, "node_id", id, "error", errConnectionFailed)),
-			kafkaErrClientClosed: set.GetOrCreateCounter(metricName(metricSourceKafkaErrors, "node_id", id, "error", errClientClosed)),
-			kafkaErrFetch:        set.GetOrCreateCounter(metricName(metricSourceKafkaErrors, "node_id", id, "error", errFetch)),
-			highwatermark:        set.GetOrCreateGauge(metricName(metricSourceHighwater, "node_id", id), nil),
-			connections:          set.GetOrCreateCounter(metricName(metricSourceConnections, "node_id", id)),
-			lagThresholdExceeded: set.GetOrCreateCounter(metricName(metricLagThresholdExceeded, "node_id", id)),
+			networkErrConnFailed: set.GetOrCreateCounter(MetricName(MetricSourceErrors, "node_id", id, "error", ErrLabelConnectionFailed)),
+			kafkaErrClientClosed: set.GetOrCreateCounter(MetricName(MetricSourceKafkaErrors, "node_id", id, "error", ErrLabelClientClosed)),
+			kafkaErrFetch:        set.GetOrCreateCounter(MetricName(MetricSourceKafkaErrors, "node_id", id, "error", ErrLabelFetch)),
+			highwatermark:        set.GetOrCreateGauge(MetricName(MetricSourceHighwater, "node_id", id), nil),
+			connections:          set.GetOrCreateCounter(MetricName(MetricSourceConnections, "node_id", id)),
+			lagThresholdExceeded: set.GetOrCreateCounter(MetricName(MetricLagThresholdExceeded, "node_id", id)),
 		}
 	}
 	return sm
@@ -80,8 +80,9 @@ type Server struct {
 	Client *kgo.Client
 }
 
-// TopicOffsets defines partition->offset map for any single src/target kafka topic
-type TopicOffsets map[int32]kgo.Offset
+// TopicOffsets defines partition->offset map for any single src/target kafka topic.
+// Values are plain int64 offsets, keeping the public API free of kgo types.
+type TopicOffsets map[int32]int64
 
 // SourcePool manages the source Kafka instances and consumption.
 type SourcePool struct {
@@ -143,7 +144,7 @@ func NewSourcePool(cfg SourcePoolCfg, serverCfgs []ConsumerCfg, topic Topic, tar
 		servers:   servers,
 		log:       log,
 		metr:      newSourceMetrics(m, servers),
-		backoffFn: getBackoffFn(cfg.EnableBackoff, cfg.BackoffMin, cfg.BackoffMax),
+		backoffFn: GetBackoffFn(cfg.EnableBackoff, cfg.BackoffMin, cfg.BackoffMax),
 	}
 
 	sp.setInitialOffsets(targetOffsets)
@@ -157,7 +158,7 @@ func (sp *SourcePool) setInitialOffsets(of TopicOffsets) {
 	// This is done to resume if target already has messages published from src.
 	var w int64
 	for _, o := range of {
-		w += o.EpochOffset().Offset
+		w += o
 	}
 
 	// Set the current candidate with initial weight and a placeholder ID. This initial
@@ -195,7 +196,7 @@ loop:
 					retries++
 					sp.metr.nodes[s.ID].networkErrConnFailed.Inc()
 					sp.log.Error("new source connection failed", "id", s.ID, "broker", s.Config.BootstrapBrokers, "error", err, "retries", retries)
-					waitTries(globalCtx, sp.backoffFn(retries))
+					WaitTries(globalCtx, sp.backoffFn(retries))
 					continue loop
 				}
 
@@ -214,7 +215,7 @@ loop:
 			retries++
 			sp.metr.unhealthy.Inc()
 			sp.log.Error("no healthy server found. waiting and retrying", "retries", retries, "error", err)
-			waitTries(globalCtx, sp.backoffFn(retries))
+			WaitTries(globalCtx, sp.backoffFn(retries))
 		}
 	}
 }
@@ -255,19 +256,19 @@ func (sp *SourcePool) RecordOffsets(rec *kgo.Record) error {
 	if sp.topic.SourceTopic != rec.Topic {
 		return fmt.Errorf("target topic not found for src topic %s", rec.Topic)
 	}
-	sp.targetOffsets[rec.Partition] = kgo.NewOffset().At(rec.Offset + 1)
+	sp.targetOffsets[rec.Partition] = rec.Offset + 1
 
 	return nil
 }
 
 func (sp *SourcePool) GetHighWatermark(ctx context.Context, cl *kgo.Client) (kadm.ListedOffsets, error) {
-	return getHighWatermark(ctx, cl, []string{sp.topic.SourceTopic}, sp.cfg.ReqTimeout)
+	return GetHighWatermark(ctx, cl, []string{sp.topic.SourceTopic}, sp.cfg.ReqTimeout)
 }
 
 // newConn initializes a new consumer group config.
 func (sp *SourcePool) newConn(ctx context.Context, s Server) (*kgo.Client, error) {
 	sp.log.Debug("running TCP health check", "id", s.ID, "server", s.Config.BootstrapBrokers, "session_timeout", s.Config.SessionTimeout)
-	if ok := checkTCP(ctx, s.Config.BootstrapBrokers, s.Config.SessionTimeout); !ok {
+	if ok := CheckTCP(ctx, s.Config.BootstrapBrokers, s.Config.SessionTimeout); !ok {
 		return nil, ErrorNoHealthy
 	}
 
@@ -420,10 +421,10 @@ func (sp *SourcePool) healthcheck(ctx context.Context, signal chan struct{}) err
 
 // initConsumer initializes a Kafka consumer client. This is used for creating consumer connection to source servers.
 func (sp *SourcePool) initConsumer(cfg ConsumerCfg) (*kgo.Client, error) {
-	// TODO: check if this grows
+	// Convert int64 offsets to kgo.Offset for ConsumePartitions.
 	cp := make(map[int32]kgo.Offset)
 	for p, o := range sp.targetOffsets {
-		cp[p] = kgo.NewOffset().At(o.EpochOffset().Offset)
+		cp[p] = kgo.NewOffset().At(o)
 	}
 
 	sp.log.Info("initializing new source consumer", "offsets", cp, "brokers", cfg.BootstrapBrokers)
@@ -438,14 +439,14 @@ func (sp *SourcePool) initConsumer(cfg ConsumerCfg) (*kgo.Client, error) {
 	}
 
 	if cfg.EnableAuth {
-		opts = addSASLConfig(opts, cfg.KafkaCfg)
+		opts = AddSASLConfig(opts, cfg.KafkaCfg)
 	}
 
 	if cfg.EnableTLS {
 		if cfg.CACertPath == "" && cfg.ClientCertPath == "" && cfg.ClientKeyPath == "" {
 			opts = append(opts, kgo.DialTLS())
 		} else {
-			tlsOpt, err := getTLSConfig(cfg.CACertPath, cfg.ClientCertPath, cfg.ClientKeyPath)
+			tlsOpt, err := GetTLSConfig(cfg.CACertPath, cfg.ClientCertPath, cfg.ClientKeyPath)
 			if err != nil {
 				return nil, err
 			}
@@ -460,7 +461,7 @@ func (sp *SourcePool) initConsumer(cfg ConsumerCfg) (*kgo.Client, error) {
 		return nil, err
 	}
 
-	if err := validateConn(cl, cfg.SessionTimeout, []string{sp.topic.SourceTopic}, nil); err != nil {
+	if err := ValidateConn(cl, cfg.SessionTimeout, []string{sp.topic.SourceTopic}, nil); err != nil {
 		cl.Close()
 		return nil, err
 	}
@@ -481,14 +482,14 @@ func (sp *SourcePool) initConsumerClient(cfg ConsumerCfg) (*kgo.Client, error) {
 	}
 
 	if cfg.EnableAuth {
-		opts = addSASLConfig(opts, cfg.KafkaCfg)
+		opts = AddSASLConfig(opts, cfg.KafkaCfg)
 	}
 
 	if cfg.EnableTLS {
 		if cfg.CACertPath == "" && cfg.ClientCertPath == "" && cfg.ClientKeyPath == "" {
 			opts = append(opts, kgo.DialTLS())
 		} else {
-			tlsOpt, err := getTLSConfig(cfg.CACertPath, cfg.ClientCertPath, cfg.ClientKeyPath)
+			tlsOpt, err := GetTLSConfig(cfg.CACertPath, cfg.ClientCertPath, cfg.ClientKeyPath)
 			if err != nil {
 				return nil, err
 			}

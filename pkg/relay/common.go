@@ -21,52 +21,53 @@ import (
 	"github.com/twmb/franz-go/pkg/sasl/scram"
 )
 
-const relayMetricPrefix = "kafka_relay_"
+const RelayMetricPrefix = "kafka_relay_"
 
-// Base metric names.
+// Metric names. Target{} implementations should use these to emit metrics.
 const (
-	metricSourceErrors      = "source_errors_total"
-	metricSourceUnhealthy   = "source_unhealthy_total"
-	metricSourceKafkaErrors = "source_kafka_errors_total"
-	metricSourceHighwater   = "source_highwatermark"
-	metricTargetErrors      = "target_errors_total"
-	metricTargetKafkaErrors = "target_kafka_errors_total"
-	metricMsgsRelayed       = "messages_relayed_total"
+	MetricSourceErrors      = "source_errors_total"
+	MetricSourceUnhealthy   = "source_unhealthy_total"
+	MetricSourceKafkaErrors = "source_kafka_errors_total"
+	MetricSourceHighwater   = "source_highwatermark"
+	MetricTargetErrors      = "target_errors_total"
+	MetricTargetKafkaErrors = "target_kafka_errors_total"
+	MetricMsgsRelayed       = "messages_relayed_total"
 
-	metricFilteredMsgs         = "messages_filtered_total"
-	metricInletBlocks          = "target_inlet_blocks_total"
-	metricFlushBatchSize       = "target_flush_batch_size"
-	metricFlushDuration        = "target_flush_duration_seconds"
-	metricFlushRetries         = "target_flush_retries_total"
-	metricCandidateSwitches    = "source_candidate_switches_total"
-	metricSourceConnections    = "source_connections_total"
-	metricLagThresholdExceeded = "source_lag_threshold_exceeded_total"
+	MetricFilteredMsgs         = "messages_filtered_total"
+	MetricInletBlocks          = "target_inlet_blocks_total"
+	MetricFlushBatchSize       = "target_flush_batch_size"
+	MetricFlushDuration        = "target_flush_duration_seconds"
+	MetricFlushRetries         = "target_flush_retries_total"
+	MetricCandidateSwitches    = "source_candidate_switches_total"
+	MetricSourceConnections    = "source_connections_total"
+	MetricLagThresholdExceeded = "source_lag_threshold_exceeded_total"
 )
 
-// Canonical error label values.
+// Canonical error labels for metrics.
 const (
-	errConnectionFailed   = "connection_failed"
-	errClientClosed       = "client_closed"
-	errFetch              = "fetch_error"
-	errTLSConfig          = "tls_config_error"
-	errClientCreation     = "client_creation_failed"
-	errProducerConnection = "connection_failed"
-	errProduce            = "produce_failed"
-	errProduceRetries     = "produce_retries_exhausted"
+	ErrLabelConnectionFailed   = "connection_failed"
+	ErrLabelClientClosed       = "client_closed"
+	ErrLabelFetch              = "fetch_error"
+	ErrLabelTLSConfig          = "tls_config_error"
+	ErrLabelClientCreation     = "client_creation_failed"
+	ErrLabelProducerConnection = "connection_failed"
+	ErrLabelProduce            = "produce_failed"
+	ErrLabelProduceRetries     = "produce_retries_exhausted"
 )
 
 var (
 	ErrLaggingBehind = fmt.Errorf("topic end offset is lagging behind")
 )
 
-// metricName builds a Prometheus metric name with optional labels.
-func metricName(base string, labels ...string) string {
+// MetricName builds a Prometheus metric name with optional key=value label pairs.
+// E.g. MetricName("errors_total", "node_id", "1") → `kafka_relay_errors_total{node_id="1"}`
+func MetricName(base string, labels ...string) string {
 	if len(labels) == 0 {
-		return relayMetricPrefix + base
+		return RelayMetricPrefix + base
 	}
 
 	var b strings.Builder
-	b.WriteString(relayMetricPrefix)
+	b.WriteString(RelayMetricPrefix)
 	b.WriteString(base)
 	b.WriteByte('{')
 	for i := 0; i < len(labels); i += 2 {
@@ -100,7 +101,7 @@ const (
 	StateConnecting
 )
 
-func getCompressionCodec(codec string) kgo.CompressionCodec {
+func GetCompressionCodec(codec string) kgo.CompressionCodec {
 	switch codec {
 	case "gzip":
 		return kgo.GzipCompression()
@@ -112,14 +113,13 @@ func getCompressionCodec(codec string) kgo.CompressionCodec {
 		return kgo.ZstdCompression()
 	case "none":
 		return kgo.NoCompression()
-
 	default:
 		return kgo.NoCompression()
 	}
 }
 
-// getAckPolicy generates franz-go's commit ack for the given stream.CommitAck.
-func getAckPolicy(ack string) kgo.Acks {
+// GetAckPolicy generates franz-go's commit ack for the given stream.CommitAck.
+func GetAckPolicy(ack string) kgo.Acks {
 	switch ack {
 	case "tcp":
 		return kgo.NoAck()
@@ -127,15 +127,15 @@ func getAckPolicy(ack string) kgo.Acks {
 		return kgo.AllISRAcks()
 	case "leader":
 		return kgo.LeaderAck()
-
 	// fallback to default config in franz-go
 	default:
 		return kgo.AllISRAcks()
 	}
 }
 
-// validateConn tests if the connection is active or not; Also confirms the existence of topics
-func validateConn(client *kgo.Client, timeout time.Duration, topics []string, partitions map[string]uint) error {
+// ValidateConn tests if the connection is active and confirms the existence of topics
+// (and optionally, specific partitions).
+func ValidateConn(client *kgo.Client, timeout time.Duration, topics []string, partitions map[string]uint) error {
 	if timeout == 0 {
 		timeout = 15 * time.Second
 	}
@@ -194,7 +194,7 @@ func validateConn(client *kgo.Client, timeout time.Duration, topics []string, pa
 	return nil
 }
 
-func getTLSConfig(ca, cl, key string) (kgo.Opt, error) {
+func GetTLSConfig(ca, cl, key string) (kgo.Opt, error) {
 	// Load the CA certificate.
 	caCert, err := os.ReadFile(ca)
 	if err != nil {
@@ -218,7 +218,7 @@ func getTLSConfig(ca, cl, key string) (kgo.Opt, error) {
 	}), nil
 }
 
-func addSASLConfig(opts []kgo.Opt, cfg KafkaCfg) []kgo.Opt {
+func AddSASLConfig(opts []kgo.Opt, cfg KafkaCfg) []kgo.Opt {
 	switch m := cfg.SASLMechanism; m {
 	case SASLMechanismPlain:
 		p := plain.Auth{
@@ -244,8 +244,8 @@ func addSASLConfig(opts []kgo.Opt, cfg KafkaCfg) []kgo.Opt {
 	return opts
 }
 
-// getBackoffFn returns the backoff function based on Backoff config.
-func getBackoffFn(enabled bool, min, max time.Duration) func(int) time.Duration {
+// GetBackoffFn returns a backoff function based on the config.
+func GetBackoffFn(enabled bool, min, max time.Duration) func(int) time.Duration {
 	if enabled {
 		return retryBackoff(min, max)
 	} else {
@@ -283,8 +283,8 @@ func retryBackoff(min, max time.Duration) func(int) time.Duration {
 	}
 }
 
-// waitTries waits for the timer to hit for the deadline with the backoff duration.
-func waitTries(ctx context.Context, waitDuration time.Duration) {
+// WaitTries waits for the given backoff duration, respecting context cancellation.
+func WaitTries(ctx context.Context, waitDuration time.Duration) {
 	if waitDuration == 0 {
 		return
 	}
@@ -323,8 +323,8 @@ func checkNetErr(err error) bool {
 	return false
 }
 
-// checkTCP dials a TCP address and checks if it's reachable.
-func checkTCP(ctx context.Context, addrs []string, timeout time.Duration) bool {
+// CheckTCP dials a TCP address and checks if it's reachable.
+func CheckTCP(ctx context.Context, addrs []string, timeout time.Duration) bool {
 	d := net.Dialer{Timeout: timeout}
 	up := false
 	for _, addr := range addrs {
@@ -348,8 +348,8 @@ func checkTCP(ctx context.Context, addrs []string, timeout time.Duration) bool {
 	return up
 }
 
-// getHighWatermark returns the highest watermark / offsets for the given topics as of the moment of requesting.
-func getHighWatermark(ctx context.Context, client *kgo.Client, topics []string, timeout time.Duration) (kadm.ListedOffsets, error) {
+// GetHighWatermark returns the highest watermark / offsets for the given topics as of the moment of requesting.
+func GetHighWatermark(ctx context.Context, client *kgo.Client, topics []string, timeout time.Duration) (kadm.ListedOffsets, error) {
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
