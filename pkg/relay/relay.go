@@ -328,11 +328,12 @@ func (re *Relay) processMessage(ctx context.Context, rec *kgo.Record) error {
 	}
 
 	msg := Message{
-		Key:       rec.Key,
-		Value:     rec.Value,
-		Topic:     re.topic.TargetTopic,
-		Partition: partition,
-		Offset:    rec.Offset,
+		Key:             rec.Key,
+		Value:           rec.Value,
+		Topic:           re.topic.TargetTopic,
+		Partition:       partition,
+		Offset:          rec.Offset,
+		SourcePartition: rec.Partition,
 		Headers: []Header{
 			{Key: "_t", Value: nsToBytes(rec.Timestamp.UnixNano())},
 		},

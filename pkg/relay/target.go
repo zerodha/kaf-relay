@@ -12,12 +12,13 @@ type Header struct {
 // The relay converts source Kafka records into Message{}s before
 // passing them to a Target.
 type Message struct {
-	Key       []byte
-	Value     []byte
-	Headers   []Header
-	Topic     string // Target topic
-	Partition int32  // Target partition (-1 for auto)
-	Offset    int64  // Source message offset.
+	Key             []byte
+	Value           []byte
+	Headers         []Header
+	Topic           string // Target topic
+	Partition       int32  // Target partition (-1 for auto)
+	Offset          int64  // Source message offset.
+	SourcePartition int32  // Source partition (for offset tracking by targets).
 }
 
 // Offsets maps topic -> partition -> offset. This represents the progress of message offsets at a target.

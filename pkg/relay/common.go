@@ -245,13 +245,15 @@ func AddSASLConfig(opts []kgo.Opt, cfg KafkaCfg) []kgo.Opt {
 }
 
 // GetBackoffFn returns a backoff function based on the config.
+// Even when backoff is disabled, a minimum 1-second delay is used to prevent CPU spinning.
 func GetBackoffFn(enabled bool, min, max time.Duration) func(int) time.Duration {
 	if enabled {
 		return retryBackoff(min, max)
-	} else {
-		return func(int) time.Duration {
-			return 0
-		}
+	}
+	// When backoff is disabled, still use a minimum delay to prevent CPU spinning
+	// during retry loops (e.g., when no healthy servers are available).
+	return func(int) time.Duration {
+		return time.Second
 	}
 }
 
