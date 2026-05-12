@@ -72,7 +72,7 @@ func main() {
 			// Start the relay. This is an indefinitely blocking call.
 			defer wg.Done()
 
-			target, err := kafkatarget.New(initTargetConfig(ko), prodConfig, topics, globalCtx, metr, lo)
+			target, err := kafkatarget.New(globalCtx, initTargetConfig(ko), prodConfig, topics, metr, lo)
 			if err != nil {
 				log.Fatalf("error initializing target controller: %v", err)
 			}

@@ -52,10 +52,10 @@ func (rm *relayMetrics) incRelayed(srcTopic string, srcPartition int32, tgtTopic
 	c, ok = rm.relayed[key]
 	if !ok {
 		c = rm.set.GetOrCreateCounter(MetricName(MetricMsgsRelayed,
-			"source_topic", srcTopic,
-			"source_partition", strconv.Itoa(int(srcPartition)),
-			"target_topic", tgtTopic,
-			"target_partition", strconv.Itoa(int(tgtPartition)),
+			Label{"source_topic", srcTopic},
+			Label{"source_partition", strconv.Itoa(int(srcPartition))},
+			Label{"target_topic", tgtTopic},
+			Label{"target_partition", strconv.Itoa(int(tgtPartition))},
 		))
 		rm.relayed[key] = c
 	}
@@ -308,7 +308,7 @@ func (re *Relay) processMessage(ctx context.Context, rec *kgo.Record) error {
 		for n, f := range re.filters {
 			if !f.IsAllowed(rec.Value) {
 				re.log.Debug("filtering message", "message", string(rec.Value), "filter", n)
-				re.metrics.GetOrCreateCounter(MetricName(MetricFilteredMsgs, "filter", n)).Inc()
+				re.metrics.GetOrCreateCounter(MetricName(MetricFilteredMsgs, Label{"filter", n})).Inc()
 				ok = false
 				break
 			}

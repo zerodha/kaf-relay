@@ -163,7 +163,7 @@ func (r *RedisTarget) Close() error {
 Connect it to the relay.
 
 ```go
-target := NewRedisTarget("localhost:6379", log)
+target := NewRedisTarget("localhost:6379", "my-stream", log)
 
 srcPool, _ := relay.NewSourcePool(poolCfg, consumerCfgs, topic, nil, metricsSet, log)
 

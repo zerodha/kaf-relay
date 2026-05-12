@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"errors"
 	"fmt"
 	"math/rand"
 	"net"
@@ -56,12 +57,17 @@ const (
 )
 
 var (
-	ErrLaggingBehind = fmt.Errorf("topic end offset is lagging behind")
+	ErrLaggingBehind = errors.New("topic end offset is lagging behind")
 )
 
-// MetricName builds a Prometheus metric name with optional key=value label pairs.
-// E.g. MetricName("errors_total", "node_id", "1") → `kafka_relay_errors_total{node_id="1"}`
-func MetricName(base string, labels ...string) string {
+// Label is a key-value pair for Prometheus metric labels.
+type Label struct {
+	Key, Value string
+}
+
+// MetricName builds a Prometheus metric name with optional labels.
+// E.g. MetricName("errors_total", Label{"node_id", "1"}) → `kafka_relay_errors_total{node_id="1"}`
+func MetricName(base string, labels ...Label) string {
 	if len(labels) == 0 {
 		return RelayMetricPrefix + base
 	}
@@ -70,13 +76,13 @@ func MetricName(base string, labels ...string) string {
 	b.WriteString(RelayMetricPrefix)
 	b.WriteString(base)
 	b.WriteByte('{')
-	for i := 0; i < len(labels); i += 2 {
+	for i, l := range labels {
 		if i > 0 {
 			b.WriteByte(',')
 		}
-		b.WriteString(labels[i])
+		b.WriteString(l.Key)
 		b.WriteString(`="`)
-		b.WriteString(labels[i+1])
+		b.WriteString(l.Value)
 		b.WriteByte('"')
 	}
 	b.WriteByte('}')
