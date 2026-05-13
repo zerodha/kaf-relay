@@ -39,12 +39,12 @@ func newSourceMetrics(set *metrics.Set, servers []Server) sourceMetrics {
 	for _, s := range servers {
 		id := strconv.Itoa(s.ID)
 		sm.nodes[s.ID] = &sourceNodeMetrics{
-			networkErrConnFailed: set.GetOrCreateCounter(MetricName(MetricSourceErrors, "node_id", id, "error", ErrLabelConnectionFailed)),
-			kafkaErrClientClosed: set.GetOrCreateCounter(MetricName(MetricSourceKafkaErrors, "node_id", id, "error", ErrLabelClientClosed)),
-			kafkaErrFetch:        set.GetOrCreateCounter(MetricName(MetricSourceKafkaErrors, "node_id", id, "error", ErrLabelFetch)),
-			highwatermark:        set.GetOrCreateGauge(MetricName(MetricSourceHighwater, "node_id", id), nil),
-			connections:          set.GetOrCreateCounter(MetricName(MetricSourceConnections, "node_id", id)),
-			lagThresholdExceeded: set.GetOrCreateCounter(MetricName(MetricLagThresholdExceeded, "node_id", id)),
+			networkErrConnFailed: set.GetOrCreateCounter(MetricName(MetricSourceErrors, Label{"node_id", id}, Label{"error", ErrLabelConnectionFailed})),
+			kafkaErrClientClosed: set.GetOrCreateCounter(MetricName(MetricSourceKafkaErrors, Label{"node_id", id}, Label{"error", ErrLabelClientClosed})),
+			kafkaErrFetch:        set.GetOrCreateCounter(MetricName(MetricSourceKafkaErrors, Label{"node_id", id}, Label{"error", ErrLabelFetch})),
+			highwatermark:        set.GetOrCreateGauge(MetricName(MetricSourceHighwater, Label{"node_id", id}), nil),
+			connections:          set.GetOrCreateCounter(MetricName(MetricSourceConnections, Label{"node_id", id})),
+			lagThresholdExceeded: set.GetOrCreateCounter(MetricName(MetricLagThresholdExceeded, Label{"node_id", id})),
 		}
 	}
 	return sm

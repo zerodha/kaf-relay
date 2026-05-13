@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"sync"
 	"time"
 
 	"github.com/VictoriaMetrics/metrics"
@@ -28,11 +29,11 @@ type targetMetrics struct {
 
 func newTargetMetrics(set *metrics.Set) targetMetrics {
 	return targetMetrics{
-		networkErrClientCreation: set.GetOrCreateCounter(relay.MetricName(relay.MetricTargetErrors, "error", relay.ErrLabelClientCreation)),
-		networkErrConnection:     set.GetOrCreateCounter(relay.MetricName(relay.MetricTargetErrors, "error", relay.ErrLabelProducerConnection)),
-		kafkaErrTLS:              set.GetOrCreateCounter(relay.MetricName(relay.MetricTargetKafkaErrors, "error", relay.ErrLabelTLSConfig)),
-		kafkaErrProduce:          set.GetOrCreateCounter(relay.MetricName(relay.MetricTargetKafkaErrors, "error", relay.ErrLabelProduce)),
-		kafkaErrProduceRetries:   set.GetOrCreateCounter(relay.MetricName(relay.MetricTargetKafkaErrors, "error", relay.ErrLabelProduceRetries)),
+		networkErrClientCreation: set.GetOrCreateCounter(relay.MetricName(relay.MetricTargetErrors, relay.Label{Key: "error", Value: relay.ErrLabelClientCreation})),
+		networkErrConnection:     set.GetOrCreateCounter(relay.MetricName(relay.MetricTargetErrors, relay.Label{Key: "error", Value: relay.ErrLabelProducerConnection})),
+		kafkaErrTLS:              set.GetOrCreateCounter(relay.MetricName(relay.MetricTargetKafkaErrors, relay.Label{Key: "error", Value: relay.ErrLabelTLSConfig})),
+		kafkaErrProduce:          set.GetOrCreateCounter(relay.MetricName(relay.MetricTargetKafkaErrors, relay.Label{Key: "error", Value: relay.ErrLabelProduce})),
+		kafkaErrProduceRetries:   set.GetOrCreateCounter(relay.MetricName(relay.MetricTargetKafkaErrors, relay.Label{Key: "error", Value: relay.ErrLabelProduceRetries})),
 		flushBatchSize:           set.GetOrCreateHistogram(relay.MetricName(relay.MetricFlushBatchSize)),
 		flushDuration:            set.GetOrCreateHistogram(relay.MetricName(relay.MetricFlushDuration)),
 		flushRetries:             set.GetOrCreateCounter(relay.MetricName(relay.MetricFlushRetries)),
@@ -45,7 +46,6 @@ type Target struct {
 	client *kgo.Client
 	cfg    relay.TargetCfg
 	pCfg   relay.ProducerCfg
-	ctx    context.Context
 	metr   targetMetrics
 	log    *slog.Logger
 
@@ -59,15 +59,17 @@ type Target struct {
 
 	// doneCh is closed when Start() returns, so Close() can wait for drain.
 	doneCh chan struct{}
+
+	closeOnce sync.Once
 }
 
 // New creates a new Kafka target that implements relay.Target.
 // It connects to the target Kafka cluster and validates that all target topics exist.
-func New(cfg relay.TargetCfg, pCfg relay.ProducerCfg, topics relay.Topics, ctx context.Context, m *metrics.Set, log *slog.Logger) (*Target, error) {
+// The provided ctx controls cancellation of the initial connection/retry loop.
+func New(ctx context.Context, cfg relay.TargetCfg, pCfg relay.ProducerCfg, topics relay.Topics, m *metrics.Set, log *slog.Logger) (*Target, error) {
 	tg := &Target{
 		cfg:    cfg,
 		pCfg:   pCfg,
-		ctx:    ctx,
 		metr:   newTargetMetrics(m),
 		log:    log,
 		topics: topics,
@@ -77,7 +79,7 @@ func New(cfg relay.TargetCfg, pCfg relay.ProducerCfg, topics relay.Topics, ctx c
 		doneCh:  make(chan struct{}),
 	}
 
-	cl, err := tg.initProducer(topics)
+	cl, err := tg.initProducer(ctx, topics)
 	if err != nil {
 		return nil, err
 	}
@@ -209,8 +211,11 @@ func (tg *Target) Write(ctx context.Context, msg relay.Message) error {
 
 // Close signals the target to stop accepting new messages, drain
 // any buffered messages, and shut down. Blocks until Start() returns.
+// Safe to call multiple times; only the first call has effect.
 func (tg *Target) Close() error {
-	close(tg.inletCh)
+	tg.closeOnce.Do(func() {
+		close(tg.inletCh)
+	})
 
 	// Wait for Start() to finish draining.
 	<-tg.doneCh
@@ -223,7 +228,7 @@ func (tg *Target) Close() error {
 }
 
 // initProducer creates the Kafka producer client with retries.
-func (tg *Target) initProducer(top relay.Topics) (*kgo.Client, error) {
+func (tg *Target) initProducer(ctx context.Context, top relay.Topics) (*kgo.Client, error) {
 	opts := []kgo.Opt{
 		kgo.ProduceRequestTimeout(tg.pCfg.SessionTimeout),
 		kgo.RecordDeliveryTimeout(tg.pCfg.SessionTimeout),
@@ -270,7 +275,7 @@ func (tg *Target) initProducer(top relay.Topics) (*kgo.Client, error) {
 outerLoop:
 	for retries < tg.pCfg.MaxRetries || tg.pCfg.MaxRetries == relay.IndefiniteRetry {
 		select {
-		case <-tg.ctx.Done():
+		case <-ctx.Done():
 			break outerLoop
 		default:
 			cl, err = kgo.NewClient(opts...)
@@ -278,7 +283,7 @@ outerLoop:
 				tg.metr.networkErrClientCreation.Inc()
 				tg.log.Error("error creating producer client", "error", err)
 				retries++
-				relay.WaitTries(tg.ctx, backoff(retries))
+				relay.WaitTries(ctx, backoff(retries))
 				continue
 			}
 
@@ -301,7 +306,7 @@ outerLoop:
 				tg.metr.networkErrConnection.Inc()
 				tg.log.Error("error connecting to producer", "err", err)
 				retries++
-				relay.WaitTries(tg.ctx, backoff(retries))
+				relay.WaitTries(ctx, backoff(retries))
 				continue
 			}
 
@@ -316,7 +321,7 @@ outerLoop:
 	return cl, nil
 }
 
-// drain drains and flushes any pending messages in the producer.
+// drain drains any remaining buffered messages from inletCh and flushes the batch.
 func (tg *Target) drain() error {
 	now := time.Now()
 	for rec := range tg.inletCh {
