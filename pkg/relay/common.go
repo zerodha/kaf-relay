@@ -22,10 +22,10 @@ import (
 	"github.com/twmb/franz-go/pkg/sasl/scram"
 )
 
-const RelayMetricPrefix = "kafka_relay_"
-
-// Metric names. Target{} implementations should use these to emit metrics.
 const (
+	RelayMetricPrefix = "kafka_relay_"
+
+	// Metric names. Target{} implementations should use these to emit metrics.
 	MetricSourceErrors      = "source_errors_total"
 	MetricSourceUnhealthy   = "source_unhealthy_total"
 	MetricSourceKafkaErrors = "source_kafka_errors_total"
@@ -42,10 +42,8 @@ const (
 	MetricCandidateSwitches    = "source_candidate_switches_total"
 	MetricSourceConnections    = "source_connections_total"
 	MetricLagThresholdExceeded = "source_lag_threshold_exceeded_total"
-)
 
-// Canonical error labels for metrics.
-const (
+	// Canonical error labels for metrics.
 	ErrLabelConnectionFailed   = "connection_failed"
 	ErrLabelClientClosed       = "client_closed"
 	ErrLabelFetch              = "fetch_error"
@@ -54,16 +52,32 @@ const (
 	ErrLabelProducerConnection = "connection_failed"
 	ErrLabelProduce            = "produce_failed"
 	ErrLabelProduceRetries     = "produce_retries_exhausted"
+
+	// SASL mechanisms.
+	SASLMechanismPlain       = "PLAIN"
+	SASLMechanismScramSHA256 = "SCRAM-SHA-256"
+	SASLMechanismScramSHA512 = "SCRAM-SHA-512"
+
+	// Relay modes.
+	ModeFailover    = "failover"
+	ModeSingle      = "single"
+	IndefiniteRetry = -1
 )
 
-var (
-	ErrLaggingBehind = errors.New("topic end offset is lagging behind")
+// Connection states (iota-based, must stay in a separate block).
+const (
+	StateDisconnected = iota
+	StateConnecting
 )
 
 // Label is a key-value pair for Prometheus metric labels.
 type Label struct {
 	Key, Value string
 }
+
+var (
+	ErrLaggingBehind = errors.New("topic end offset is lagging behind")
+)
 
 // MetricName builds a Prometheus metric name with optional labels.
 // E.g. MetricName("errors_total", Label{"node_id", "1"}) → `kafka_relay_errors_total{node_id="1"}`
@@ -89,23 +103,6 @@ func MetricName(base string, labels ...Label) string {
 
 	return b.String()
 }
-
-const (
-	SASLMechanismPlain       = "PLAIN"
-	SASLMechanismScramSHA256 = "SCRAM-SHA-256"
-	SASLMechanismScramSHA512 = "SCRAM-SHA-512"
-)
-
-const (
-	ModeFailover    = "failover"
-	ModeSingle      = "single"
-	IndefiniteRetry = -1
-)
-
-const (
-	StateDisconnected = iota
-	StateConnecting
-)
 
 func GetCompressionCodec(codec string) kgo.CompressionCodec {
 	switch codec {
