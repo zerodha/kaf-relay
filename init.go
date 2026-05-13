@@ -21,7 +21,7 @@ import (
 	"github.com/knadh/koanf/v2"
 	flag "github.com/spf13/pflag"
 	"github.com/zerodha/kaf-relay/filter"
-	"github.com/zerodha/kaf-relay/internal/relay"
+	"github.com/zerodha/kaf-relay/pkg/relay"
 )
 
 func initFlags(ko *koanf.Koanf) {

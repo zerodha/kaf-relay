@@ -6,10 +6,10 @@ import (
 
 // Topic represents a source->target topic configuration.
 type Topic struct {
-	SourceTopic         string
-	TargetTopic         string
-	TargetPartition     uint
-	AutoTargetPartition bool
+	SourceTopic         string `koanf:"source_topic"`
+	TargetTopic         string `koanf:"target_topic"`
+	TargetPartition     uint   `koanf:"target_partition"`
+	AutoTargetPartition bool   `koanf:"auto_target_partition"`
 }
 
 // Topics is an abstraction over source->target topic map.
@@ -45,6 +45,14 @@ type KafkaCfg struct {
 // ConsumerCfg is the direct consumer config.
 type ConsumerCfg struct {
 	KafkaCfg `koanf:",squash"`
+}
+
+// TargetCfg is the target/writer config (backoff, timeouts).
+type TargetCfg struct {
+	ReqTimeout    time.Duration `koanf:"request_timeout"`
+	EnableBackoff bool          `koanf:"enable_backoff"`
+	BackoffMin    time.Duration `koanf:"backoff_min"`
+	BackoffMax    time.Duration `koanf:"backoff_max"`
 }
 
 // ProducerCfg is the Kafka producer config.

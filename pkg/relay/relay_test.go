@@ -34,7 +34,7 @@ func NewCluster(port int) (*Cluster, error) {
 func (c *Cluster) AddProducer(addrs []string) error {
 	opts := []kgo.Opt{
 		kgo.ProduceRequestTimeout(time.Second),
-		kgo.RecordDeliveryTimeout(7 * time.Second), // break the :ProduceSync if it takes too long
+		kgo.RecordDeliveryTimeout(7 * time.Second),
 		kgo.SeedBrokers(addrs...),
 	}
 

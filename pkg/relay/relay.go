@@ -5,7 +5,6 @@ import (
 	"log/slog"
 	"strconv"
 	"sync"
-	"time"
 
 	"github.com/VictoriaMetrics/metrics"
 	"github.com/twmb/franz-go/pkg/kadm"
@@ -17,12 +16,60 @@ type RelayCfg struct {
 	StopAtEnd bool
 }
 
-// Relay represents the input, output kafka and the remapping necessary to forward messages from one topic to another.
+// relayMetrics holds the per-relay counters that are relay-level concerns
+// (as opposed to target-level concerns like flush errors).
+type relayMetrics struct {
+	candidateSwitches *metrics.Counter
+
+	// Lazy-cached per topic-partition relay counters.
+	relayed   map[string]*metrics.Counter
+	relayedMu sync.RWMutex
+	set       *metrics.Set
+}
+
+func newRelayMetrics(set *metrics.Set) relayMetrics {
+	return relayMetrics{
+		candidateSwitches: set.GetOrCreateCounter(MetricName(MetricCandidateSwitches)),
+		relayed:           make(map[string]*metrics.Counter),
+		set:               set,
+	}
+}
+
+// incRelayed increments the relay counter for the given source→target topic-partition.
+// Uses double-checked RWMutex locking to lazily cache counters per unique combination.
+func (rm *relayMetrics) incRelayed(srcTopic string, srcPartition int32, tgtTopic string, tgtPartition int32) {
+	key := srcTopic + ":" + strconv.Itoa(int(srcPartition)) + ":" + tgtTopic + ":" + strconv.Itoa(int(tgtPartition))
+
+	rm.relayedMu.RLock()
+	c, ok := rm.relayed[key]
+	rm.relayedMu.RUnlock()
+	if ok {
+		c.Inc()
+		return
+	}
+
+	rm.relayedMu.Lock()
+	c, ok = rm.relayed[key]
+	if !ok {
+		c = rm.set.GetOrCreateCounter(MetricName(MetricMsgsRelayed,
+			Label{"source_topic", srcTopic},
+			Label{"source_partition", strconv.Itoa(int(srcPartition))},
+			Label{"target_topic", tgtTopic},
+			Label{"target_partition", strconv.Itoa(int(tgtPartition))},
+		))
+		rm.relayed[key] = c
+	}
+	rm.relayedMu.Unlock()
+	c.Inc()
+}
+
+// Relay orchestrates consumption from a SourcePool and writing to a Target.
 type Relay struct {
 	cfg     RelayCfg
 	source  *SourcePool
-	target  *Target
+	target  Target
 	metrics *metrics.Set
+	metr    relayMetrics
 	log     *slog.Logger
 
 	topic Topic
@@ -42,15 +89,18 @@ type Relay struct {
 	filters map[string]filter.Provider
 }
 
-func NewRelay(cfg RelayCfg, src *SourcePool, target *Target, topic Topic, filters map[string]filter.Provider, m *metrics.Set, log *slog.Logger) (*Relay, error) {
+func NewRelay(cfg RelayCfg, src *SourcePool, target Target, topic Topic, filters map[string]filter.Provider, m *metrics.Set, log *slog.Logger) (*Relay, error) {
 	// If stop-at-end is set, fetch and cache the offsets to determine
 	// when end is reached.
 	var offsets TopicOffsets
 	if cfg.StopAtEnd {
-		if o, err := target.GetHighWatermark(); err != nil {
+		hwm, err := target.GetHighWatermark(context.Background())
+		if err != nil {
 			return nil, err
-		} else {
-			offsets = o.KOffsets()[topic.TargetTopic]
+		}
+		// Convert relay.Offsets for the target topic to TopicOffsets (map[int32]int64).
+		if topicOffsets, ok := hwm[topic.TargetTopic]; ok {
+			offsets = topicOffsets
 		}
 	}
 
@@ -59,6 +109,7 @@ func NewRelay(cfg RelayCfg, src *SourcePool, target *Target, topic Topic, filter
 		source:  src,
 		target:  target,
 		metrics: m,
+		metr:    newRelayMetrics(m),
 		log:     log,
 
 		topic:    topic,
@@ -94,7 +145,7 @@ func (re *Relay) Start(globalCtx context.Context) error {
 		}
 	}()
 
-	// Start the target / producer controller.
+	// Start the target's background loop (e.g. batching/flushing for Kafka).
 	wg.Add(1)
 	re.log.Info("starting producer worker")
 	go func() {
@@ -104,11 +155,11 @@ func (re *Relay) Start(globalCtx context.Context) error {
 		}
 	}()
 
-	// Start the consumer group worker by trigger a signal to the relay loop to fetch
+	// Start the consumer group worker by triggering a signal to the relay loop to fetch
 	// a consumer worker to fetch initial healthy node.
 	re.log.Info("starting consumer worker")
-	// The push is non-blocking to avoid getting stuck trying to send on the poll loop
-	// if the threshold checker go-routine might have already sent on the channel concurrently.
+	// Non-blocking push to avoid getting stuck if the threshold checker goroutine
+	// has already sent on the channel concurrently.
 	select {
 	case re.signalCh <- struct{}{}:
 	default:
@@ -128,10 +179,7 @@ func (re *Relay) Start(globalCtx context.Context) error {
 		re.log.Error("error starting consumer worker", "err", err)
 	}
 
-	// Close the producer inlet channel.
-	close(re.target.inletCh)
-
-	// Close producer.
+	// Signal the target to drain and shut down.
 	re.target.Close()
 
 	cancel()
@@ -154,7 +202,7 @@ loop:
 			return ctx.Err()
 
 		case <-re.signalCh:
-			re.metrics.GetOrCreateCounter(metricName(metricCandidateSwitches)).Inc()
+			re.metr.candidateSwitches.Inc()
 			re.log.Info("poll loop received unhealthy signal. requesting new node")
 
 			for {
@@ -181,14 +229,13 @@ loop:
 		default:
 			if re.cfg.StopAtEnd {
 				// If relay is configured to sync-until-end (highest offset watermark at the time of relay boot),
-				// pn the first ever connection (not reconnections) of relay after boot, fetch the highest offsets
+				// on the first ever connection (not reconnections) of relay after boot, fetch the highest offsets
 				// of the topic to compare.
 				if firstPoll {
 					of, err := re.source.GetHighWatermark(ctx, server.Client)
 					if err != nil {
 						re.log.Error("could not get end offsets (first poll); sending unhealthy signal", "id", server.ID, "server", server.Config.BootstrapBrokers, "error", err)
-						// The push is non-blocking to avoid getting stuck trying to send on the poll loop
-						// if the threshold checker go-routine might have already sent on the channel concurrently.
+						// Non-blocking push to avoid getting stuck.
 						select {
 						case re.signalCh <- struct{}{}:
 						default:
@@ -215,8 +262,7 @@ loop:
 			fetches, err := re.source.GetFetches(server)
 			if err != nil {
 				re.log.Error("marking server as unhealthy", "server", server.ID)
-				// The push is non-blocking to avoid getting stuck trying to send on the poll loop
-				// if the threshold checker go-routine might have already sent on the channel concurrently.
+				// Non-blocking push to avoid getting stuck.
 				select {
 				case re.signalCh <- struct{}{}:
 				default:
@@ -248,7 +294,7 @@ loop:
 	}
 }
 
-// processMessage processes the given message and forwards it to the producer batch channel.
+// processMessage processes the given message and forwards it to the target.
 func (re *Relay) processMessage(ctx context.Context, rec *kgo.Record) error {
 	// Decrement the end offsets for the given topic and partition till we reach 0
 	if re.cfg.StopAtEnd {
@@ -262,7 +308,7 @@ func (re *Relay) processMessage(ctx context.Context, rec *kgo.Record) error {
 		for n, f := range re.filters {
 			if !f.IsAllowed(rec.Value) {
 				re.log.Debug("filtering message", "message", string(rec.Value), "filter", n)
-				re.metrics.GetOrCreateCounter(metricName(metricFilteredMsgs, "filter", n)).Inc()
+				re.metrics.GetOrCreateCounter(MetricName(MetricFilteredMsgs, Label{"filter", n})).Inc()
 				ok = false
 				break
 			}
@@ -273,38 +319,37 @@ func (re *Relay) processMessage(ctx context.Context, rec *kgo.Record) error {
 		}
 	}
 
-	// Add the src message time as a meta header to the target.
-	// The target consumer can check the lag between the src and target message time if required.
-	// Repurpose &kgo.Record and forward it to producer to reduce allocs.
-	rec.Headers = append(rec.Headers, kgo.RecordHeader{
-		Key:   "_t",
-		Value: nsToBytes(rec.Timestamp.UnixNano()),
-	})
-	rec.Timestamp = time.Time{}
-
-	// The incoming topic and partition are overwritten to the target topic and partition as the
-	// same kgo.Record is reused in the target for publishing.
-	rec.Topic = re.topic.TargetTopic
+	// Build the relay.Message from the source kgo.Record.
+	// Add the source message timestamp as a meta header (_t) so that downstream
+	// consumers can compute source→target lag if needed.
+	partition := int32(-1) // auto-partition
 	if !re.topic.AutoTargetPartition {
-		rec.Partition = int32(re.topic.TargetPartition)
+		partition = int32(re.topic.TargetPartition)
 	}
-	rec.Attrs = kgo.RecordAttrs{}
-	rec.ProducerEpoch = 0
-	rec.ProducerID = 0
-	rec.LeaderEpoch = 0
-	rec.Offset = 0
-	rec.Context = nil
 
-	// Queue the message for writing to target.
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case re.target.GetBatchCh() <- rec:
-	default:
-		re.metrics.GetOrCreateCounter(metricName(metricInletBlocks)).Inc()
-		re.log.Error("target inlet channel blocked")
-		re.target.GetBatchCh() <- rec
+	msg := Message{
+		Key:             rec.Key,
+		Value:           rec.Value,
+		Topic:           re.topic.TargetTopic,
+		Partition:       partition,
+		Offset:          rec.Offset,
+		SourcePartition: rec.Partition,
+		Headers: []Header{
+			{Key: "_t", Value: nsToBytes(rec.Timestamp.UnixNano())},
+		},
 	}
+
+	// Copy any existing headers from the source record.
+	for _, h := range rec.Headers {
+		msg.Headers = append(msg.Headers, Header{Key: h.Key, Value: h.Value})
+	}
+
+	if err := re.target.Write(ctx, msg); err != nil {
+		return err
+	}
+
+	// Track the relay count per source→target topic-partition pair.
+	re.metr.incRelayed(rec.Topic, rec.Partition, re.topic.TargetTopic, partition)
 
 	return nil
 }
@@ -322,7 +367,7 @@ func (re *Relay) cacheSrcOffsets(of map[int32]int64) {
 	// Read till the destination offsets and reduce it from the target weight.
 	for p, o := range re.targetOffsets {
 		if _, ok := re.srcOffsets[p]; ok {
-			re.srcOffsets[p] -= o.EpochOffset().Offset
+			re.srcOffsets[p] -= o
 		}
 	}
 }
