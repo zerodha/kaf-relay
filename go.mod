@@ -9,7 +9,7 @@ require (
 	github.com/knadh/koanf/v2 v2.3.2
 	github.com/spf13/pflag v1.0.10
 	github.com/twmb/franz-go v1.20.6
-	github.com/twmb/franz-go/pkg/kfake v0.0.0-20241202133023-293b7c4c56bb
+	github.com/twmb/franz-go/pkg/kfake v0.0.0-20251220215110-24b7a27738c1
 	github.com/twmb/franz-go/pkg/kmsg v1.12.0
 )
 

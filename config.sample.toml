@@ -14,7 +14,6 @@ source_topic2 = "target_topic2"
 
 [source_pool]
 # Kafka client config common to all upstream sources ([[sources]]).
-initial_offset = "start"
 
 # Frequency at which source servers are polled for health/lag.
 healthcheck_interval = "3s"
