@@ -1,12 +1,12 @@
 [app]
 log_level = "debug"
-metrics_server_addr = ":7081"
+metrics_server_addr = "127.0.0.1:7081"
 
 
 # Map of topics from the source to sync to the target.
 # source_topic => target_topic:optional_target_partition
-# If the target partition is not specified, whatever partition a message
-# was received from the source, the same partition is written to the target.
+# If the target partition is not specified, Kafka chooses the destination
+# partition using the producer's automatic partitioner.
 [[topics]]
 source_topic1 = "target_topic1:1"
 source_topic2 = "target_topic2"
