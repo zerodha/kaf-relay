@@ -4,6 +4,7 @@ package kafkatarget
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sync"
@@ -58,9 +59,54 @@ type Target struct {
 	batch []*kgo.Record
 
 	// doneCh is closed when Start() returns, so Close() can wait for drain.
-	doneCh chan struct{}
+	doneCh    chan struct{}
+	closeCh   chan struct{}
+	startedCh chan struct{}
 
-	closeOnce sync.Once
+	closeOnce    sync.Once
+	stopOnce     sync.Once
+	clientOnce   sync.Once
+	doneOnce     sync.Once
+	lifecycleMu  sync.Mutex
+	started      bool
+	closed       bool
+	workerCancel context.CancelFunc
+	runErr       error
+	writers      sync.WaitGroup
+	sendMu       sync.Mutex
+}
+
+var errTargetClosed = errors.New("target is closed")
+
+// mixedPartitioner preserves explicit relay partition assignments while
+// delegating records marked with partition -1 to Kafka's normal partitioning
+// strategy.
+type mixedPartitioner struct {
+	automatic kgo.Partitioner
+}
+
+func (p mixedPartitioner) ForTopic(topic string) kgo.TopicPartitioner {
+	return mixedTopicPartitioner{
+		automatic: p.automatic.ForTopic(topic),
+	}
+}
+
+type mixedTopicPartitioner struct {
+	automatic kgo.TopicPartitioner
+}
+
+func (p mixedTopicPartitioner) RequiresConsistency(record *kgo.Record) bool {
+	if record.Partition >= 0 {
+		return true
+	}
+	return p.automatic.RequiresConsistency(record)
+}
+
+func (p mixedTopicPartitioner) Partition(record *kgo.Record, partitions int) int {
+	if record.Partition >= 0 {
+		return int(record.Partition)
+	}
+	return p.automatic.Partition(record, partitions)
 }
 
 // New creates a new Kafka target that implements relay.Target.
@@ -74,9 +120,11 @@ func New(ctx context.Context, cfg relay.TargetCfg, pCfg relay.ProducerCfg, topic
 		log:    log,
 		topics: topics,
 
-		batch:   make([]*kgo.Record, 0, pCfg.BatchSize),
-		inletCh: make(chan *kgo.Record, pCfg.BufferSize),
-		doneCh:  make(chan struct{}),
+		batch:     make([]*kgo.Record, 0, pCfg.BatchSize),
+		inletCh:   make(chan *kgo.Record, pCfg.BufferSize),
+		doneCh:    make(chan struct{}),
+		closeCh:   make(chan struct{}),
+		startedCh: make(chan struct{}),
 	}
 
 	cl, err := tg.initProducer(ctx, topics)
@@ -116,38 +164,58 @@ func (tg *Target) GetHighWatermark(ctx context.Context) (relay.Offsets, error) {
 // Start runs the blocking batch/flush loop.
 // It reads messages from the internal channel, batches them, and flushes
 // to Kafka periodically or when the batch is full.
-// Returns when Close() is called (which closes inletCh) or on fatal error.
+// Returns when Close() is called or on fatal error.
 //
 // Uses its own context.Background() — deliberately detached from the global
 // context so that in-flight flushes can complete even during shutdown.
-func (tg *Target) Start() error {
-	defer close(tg.doneCh)
-
+func (tg *Target) Start() (runErr error) {
+	tg.lifecycleMu.Lock()
+	if tg.closed {
+		tg.lifecycleMu.Unlock()
+		tg.markDone()
+		return nil
+	}
+	if tg.started {
+		tg.lifecycleMu.Unlock()
+		return fmt.Errorf("target already started")
+	}
+	tg.started = true
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
+	tg.workerCancel = cancel
+	tg.lifecycleMu.Unlock()
+	close(tg.startedCh)
+	defer func() {
+		tg.stop()
+		tg.writers.Wait()
+		cancel()
+		tg.lifecycleMu.Lock()
+		tg.workerCancel = nil
+		tg.runErr = runErr
+		tg.lifecycleMu.Unlock()
+		tg.markDone()
+	}()
 	tick := time.NewTicker(tg.pCfg.FlushFrequency)
 	defer tick.Stop()
 
-	// Final flush after the loop exits.
+	// Final flush after the loop exits. Preserve an earlier worker error if one
+	// already caused the loop to stop.
 	defer func() {
 		if err := tg.client.Flush(ctx); err != nil {
 			tg.log.Error("error while flushing the producer", "err", err)
+			if runErr == nil {
+				runErr = err
+			}
 		}
+	}()
+	defer func() {
+		tg.stop()
+		tg.writers.Wait()
 	}()
 
 	for {
 		select {
 		// Queue the message and flush if the batch size is reached.
-		case msg, ok := <-tg.inletCh:
-			if !ok {
-				// Channel closed by Close() — drain remaining messages.
-				if err := tg.drain(); err != nil {
-					return err
-				}
-				return nil
-			}
-
+		case msg := <-tg.inletCh:
 			tg.batch = append(tg.batch, msg)
 			if len(tg.batch) >= tg.pCfg.FlushBatchSize {
 				// flush() only returns an error if retries are exhausted (configured via max_retries).
@@ -165,6 +233,10 @@ func (tg *Target) Start() error {
 					return err
 				}
 			}
+
+		case <-tg.closeCh:
+			tg.writers.Wait()
+			return tg.drain(ctx)
 		}
 	}
 }
@@ -172,10 +244,19 @@ func (tg *Target) Start() error {
 // Write converts a relay.Message to a kgo.Record and enqueues it for production.
 // Blocks if the internal buffer is full.
 func (tg *Target) Write(ctx context.Context, msg relay.Message) error {
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-tg.closeCh:
+		return errTargetClosed
+	case <-tg.startedCh:
+	}
+
 	rec := &kgo.Record{
-		Key:   msg.Key,
-		Value: msg.Value,
-		Topic: msg.Topic,
+		Key:       msg.Key,
+		Value:     msg.Value,
+		Topic:     msg.Topic,
+		Partition: -1,
 	}
 
 	// -1 means auto-partition (let the partitioner decide).
@@ -190,23 +271,37 @@ func (tg *Target) Write(ctx context.Context, msg relay.Message) error {
 		})
 	}
 
-	// Non-blocking attempt first; if the channel is full, log and block.
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case tg.inletCh <- rec:
-	default:
+	for {
+		tg.sendMu.Lock()
+		tg.lifecycleMu.Lock()
+		if tg.closed {
+			tg.lifecycleMu.Unlock()
+			tg.sendMu.Unlock()
+			return errTargetClosed
+		}
+		tg.writers.Add(1)
+		tg.lifecycleMu.Unlock()
+
+		select {
+		case tg.inletCh <- rec:
+			tg.sendMu.Unlock()
+			defer tg.writers.Done()
+			return nil
+		default:
+			tg.writers.Done()
+			tg.sendMu.Unlock()
+		}
+
 		tg.metr.inletBlocks.Inc()
 		tg.log.Error("target inlet channel blocked")
-		// Blocking send — backpressure from the flush loop.
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case tg.inletCh <- rec:
+		case <-tg.closeCh:
+			return errTargetClosed
+		case <-time.After(time.Millisecond):
 		}
 	}
-
-	return nil
 }
 
 // Close signals the target to stop accepting new messages, drain
@@ -214,17 +309,69 @@ func (tg *Target) Write(ctx context.Context, msg relay.Message) error {
 // Safe to call multiple times; only the first call has effect.
 func (tg *Target) Close() error {
 	tg.closeOnce.Do(func() {
-		close(tg.inletCh)
+		tg.stop()
+		tg.lifecycleMu.Lock()
+		started := tg.started
+		tg.lifecycleMu.Unlock()
+		if !started {
+			tg.markDone()
+		}
 	})
 
-	// Wait for Start() to finish draining.
-	<-tg.doneCh
+	// Wait for Start() to finish draining. A long-running retry loop gets a
+	// bounded grace period before its worker context is canceled.
+	tg.lifecycleMu.Lock()
+	started := tg.started
+	workerCancel := tg.workerCancel
+	tg.lifecycleMu.Unlock()
+	if started {
+		shutdownTimeout := tg.pCfg.SessionTimeout
+		if shutdownTimeout <= 0 {
+			shutdownTimeout = 5 * time.Second
+		}
+		timer := time.NewTimer(shutdownTimeout)
+		select {
+		case <-tg.doneCh:
+			timer.Stop()
+		case <-timer.C:
+			if workerCancel != nil {
+				workerCancel()
+			}
+			<-tg.doneCh
+		}
+	} else {
+		<-tg.doneCh
+	}
 
 	if tg.client != nil {
-		// Prevent blocking on close.
-		tg.client.PurgeTopicsFromProducing()
+		tg.clientOnce.Do(func() {
+			// Prevent blocking on close.
+			tg.client.PurgeTopicsFromProducing()
+			tg.client.Close()
+		})
 	}
-	return nil
+
+	tg.lifecycleMu.Lock()
+	runErr := tg.runErr
+	tg.lifecycleMu.Unlock()
+	return runErr
+}
+
+func (tg *Target) stop() {
+	tg.stopOnce.Do(func() {
+		tg.sendMu.Lock()
+		tg.lifecycleMu.Lock()
+		tg.closed = true
+		tg.lifecycleMu.Unlock()
+		close(tg.closeCh)
+		tg.sendMu.Unlock()
+	})
+}
+
+func (tg *Target) markDone() {
+	tg.doneOnce.Do(func() {
+		close(tg.doneCh)
+	})
 }
 
 // initProducer creates the Kafka producer client with retries.
@@ -245,7 +392,9 @@ func (tg *Target) initProducer(ctx context.Context, top relay.Topics) (*kgo.Clie
 		opts = append(opts, kgo.DisableIdempotentWrite())
 	}
 
-	opts = append(opts, kgo.RecordPartitioner(kgo.ManualPartitioner()))
+	opts = append(opts, kgo.RecordPartitioner(mixedPartitioner{
+		automatic: kgo.StickyKeyPartitioner(nil),
+	}))
 
 	if tg.pCfg.EnableAuth {
 		opts = relay.AddSASLConfig(opts, tg.pCfg.KafkaCfg)
@@ -271,18 +420,21 @@ func (tg *Target) initProducer(ctx context.Context, top relay.Topics) (*kgo.Clie
 		cl      *kgo.Client
 	)
 
-	// Retry until a successful connection.
-outerLoop:
-	for retries < tg.pCfg.MaxRetries || tg.pCfg.MaxRetries == relay.IndefiniteRetry {
+	// Attempt the initial connection once, then apply max_retries to failures
+	// after that initial attempt. This makes max_retries=0 mean "try once".
+	for {
 		select {
 		case <-ctx.Done():
-			break outerLoop
+			return nil, ctx.Err()
 		default:
 			cl, err = kgo.NewClient(opts...)
 			if err != nil {
 				tg.metr.networkErrClientCreation.Inc()
 				tg.log.Error("error creating producer client", "error", err)
 				retries++
+				if tg.pCfg.MaxRetries != relay.IndefiniteRetry && retries > tg.pCfg.MaxRetries {
+					break
+				}
 				relay.WaitTries(ctx, backoff(retries))
 				continue
 			}
@@ -300,47 +452,57 @@ outerLoop:
 			}
 
 			// Test connectivity and ensure destination topics exist.
-			if err := relay.ValidateConn(cl, tg.pCfg.SessionTimeout, topics, partitions); err != nil {
+			validationErr := relay.ValidateConn(ctx, cl, tg.pCfg.SessionTimeout, topics, partitions)
+			if validationErr != nil {
 				cl.Close()
 
 				tg.metr.networkErrConnection.Inc()
-				tg.log.Error("error connecting to producer", "err", err)
+				err = validationErr
+				tg.log.Error("error connecting to producer", "err", validationErr)
 				retries++
+				if tg.pCfg.MaxRetries != relay.IndefiniteRetry && retries > tg.pCfg.MaxRetries {
+					break
+				}
 				relay.WaitTries(ctx, backoff(retries))
 				continue
 			}
 
-			break outerLoop
+			return cl, nil
 		}
+		break
 	}
 
-	if err != nil {
-		return nil, err
+	if err == nil {
+		err = fmt.Errorf("producer connection failed after %d retries", retries)
 	}
-
-	return cl, nil
+	return nil, fmt.Errorf("producer connection failed after %d retries: %w", retries, err)
 }
 
 // drain drains any remaining buffered messages from inletCh and flushes the batch.
-func (tg *Target) drain() error {
+func (tg *Target) drain(ctx context.Context) error {
 	now := time.Now()
-	for rec := range tg.inletCh {
-		tg.batch = append(tg.batch, rec)
-	}
+	for {
+		select {
+		case rec := <-tg.inletCh:
+			tg.batch = append(tg.batch, rec)
+			if len(tg.batch) >= tg.pCfg.FlushBatchSize {
+				if err := tg.flush(ctx); err != nil {
+					return err
+				}
+			}
+		default:
+			ct := len(tg.batch)
+			if ct > 0 {
+				if err := tg.flush(ctx); err != nil {
+					return err
+				}
+			}
 
-	ct := len(tg.batch)
-	if ct > 0 {
-		ctx, cancel := context.WithTimeout(context.Background(), tg.pCfg.SessionTimeout)
-		defer cancel()
-
-		if err := tg.flush(ctx); err != nil {
-			return err
+			tg.log.Debug("flushing producer batch", "elapsed", time.Since(now).Seconds(), "count", ct)
+			tg.batch = tg.batch[:0]
+			return nil
 		}
 	}
-
-	tg.log.Debug("flushing producer batch", "elapsed", time.Since(now).Seconds(), "count", ct)
-	tg.batch = tg.batch[:0]
-	return nil
 }
 
 // flush flushes the batch to Kafka with retries. Only returns an error
@@ -352,15 +514,28 @@ func (tg *Target) flush(ctx context.Context) error {
 		retries = 0
 		sent    bool
 		backOff = relay.GetBackoffFn(tg.cfg.EnableBackoff, tg.cfg.BackoffMin, tg.cfg.BackoffMax)
+		lastErr error
 	)
 
 retry:
-	for retries < tg.pCfg.MaxRetries || tg.pCfg.MaxRetries == relay.IndefiniteRetry {
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+
 		batchLen := len(tg.batch)
 		tg.metr.flushBatchSize.Update(float64(batchLen))
 
 		// Check that the destination cluster is healthy before retrying.
 		if retries > 0 && !relay.CheckTCP(ctx, tg.pCfg.BootstrapBrokers, tg.pCfg.SessionTimeout) {
+			retries++
+			tg.metr.flushRetries.Inc()
+			if tg.pCfg.MaxRetries != relay.IndefiniteRetry && retries > tg.pCfg.MaxRetries {
+				break retry
+			}
+			backoff := backOff(retries)
+			tg.log.Debug("destination unavailable; waiting before retry", "backoff", backoff.Seconds(), "retry", retries)
+			relay.WaitTries(ctx, backoff)
 			continue
 		}
 
@@ -371,17 +546,18 @@ retry:
 			err      error
 			failures []*kgo.Record
 		)
-		for idx, res := range results {
+		for _, res := range results {
 			if res.Err == context.Canceled {
 				return ctx.Err()
 			}
 
 			if res.Err != nil {
 				// Reset context/timestamp so the record can be produced again.
-				tg.batch[idx].Timestamp = time.Time{}
-				tg.batch[idx].Context = nil
+				rec := res.Record
+				rec.Timestamp = time.Time{}
+				rec.Context = nil
 
-				failures = append(failures, tg.batch[idx])
+				failures = append(failures, rec)
 				err = res.Err
 				continue
 			}
@@ -390,6 +566,7 @@ retry:
 		tg.log.Debug("produced last offset", "offset", results[len(results)-1].Record.Offset, "batch", batchLen, "retry", retries)
 
 		if err != nil {
+			lastErr = err
 			tg.metr.kafkaErrProduce.Inc()
 			tg.log.Error("error producing message", "err", err, "failed_count", batchLen, "retry", retries)
 
@@ -406,6 +583,9 @@ retry:
 			tg.batch = failures
 			retries++
 			tg.metr.flushRetries.Inc()
+			if tg.pCfg.MaxRetries != relay.IndefiniteRetry && retries > tg.pCfg.MaxRetries {
+				break retry
+			}
 
 			b := backOff(retries)
 			tg.log.Debug("error producing message; waiting for retry...", "backoff", b.Seconds())
@@ -421,6 +601,9 @@ retry:
 
 	if !sent {
 		tg.metr.kafkaErrProduceRetries.Inc()
+		if lastErr != nil {
+			return fmt.Errorf("error producing message; exhausted retries (%v): %w", tg.pCfg.MaxRetries, lastErr)
+		}
 		return fmt.Errorf("error producing message; exhausted retries (%v)", tg.pCfg.MaxRetries)
 	}
 

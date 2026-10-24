@@ -2,7 +2,9 @@ package relay
 
 import (
 	"context"
+	"errors"
 	"log/slog"
+	"sort"
 	"strconv"
 	"sync"
 
@@ -86,7 +88,8 @@ type Relay struct {
 	srcOffsets map[int32]int64
 
 	// list of filter implementations for skipping messages
-	filters map[string]filter.Provider
+	filters     map[string]filter.Provider
+	filterOrder []string
 }
 
 func NewRelay(cfg RelayCfg, src *SourcePool, target Target, topic Topic, filters map[string]filter.Provider, m *metrics.Set, log *slog.Logger) (*Relay, error) {
@@ -104,6 +107,12 @@ func NewRelay(cfg RelayCfg, src *SourcePool, target Target, topic Topic, filters
 		}
 	}
 
+	filterOrder := make([]string, 0, len(filters))
+	for id := range filters {
+		filterOrder = append(filterOrder, id)
+	}
+	sort.Strings(filterOrder)
+
 	r := &Relay{
 		cfg:     cfg,
 		source:  src,
@@ -118,6 +127,7 @@ func NewRelay(cfg RelayCfg, src *SourcePool, target Target, topic Topic, filters
 		srcOffsets:    make(map[int32]int64),
 		targetOffsets: offsets,
 		filters:       filters,
+		filterOrder:   filterOrder,
 	}
 
 	return r, nil
@@ -146,12 +156,15 @@ func (re *Relay) Start(globalCtx context.Context) error {
 	}()
 
 	// Start the target's background loop (e.g. batching/flushing for Kafka).
+	targetErrCh := make(chan error, 1)
 	wg.Add(1)
 	re.log.Info("starting producer worker")
 	go func() {
 		defer wg.Done()
 		if err := re.target.Start(); err != nil {
 			re.log.Error("error starting producer worker", "err", err)
+			targetErrCh <- err
+			cancel()
 		}
 	}()
 
@@ -175,16 +188,30 @@ func (re *Relay) Start(globalCtx context.Context) error {
 
 	// Start the indefinite poll that asks for new connections
 	// and then consumes messages from them.
-	if err := re.startPoll(ctx); err != nil {
-		re.log.Error("error starting consumer worker", "err", err)
+	pollErr := re.startPoll(ctx)
+	if pollErr != nil && !errors.Is(pollErr, context.Canceled) {
+		re.log.Error("error starting consumer worker", "err", pollErr)
 	}
 
 	// Signal the target to drain and shut down.
-	re.target.Close()
+	closeErr := re.target.Close()
 
 	cancel()
 	wg.Wait()
 
+	select {
+	case targetErr := <-targetErrCh:
+		if !(errors.Is(targetErr, context.Canceled) && globalCtx.Err() != nil) {
+			return targetErr
+		}
+	default:
+	}
+	if closeErr != nil && !(errors.Is(closeErr, context.Canceled) && globalCtx.Err() != nil) {
+		return closeErr
+	}
+	if pollErr != nil && !errors.Is(pollErr, context.Canceled) {
+		return pollErr
+	}
 	return nil
 }
 
@@ -305,9 +332,10 @@ func (re *Relay) processMessage(ctx context.Context, rec *kgo.Record) error {
 	// the message has to be skipped or written to the target.
 	if re.filters != nil {
 		ok := true
-		for n, f := range re.filters {
+		for _, n := range re.filterOrder {
+			f := re.filters[n]
 			if !f.IsAllowed(rec.Value) {
-				re.log.Debug("filtering message", "message", string(rec.Value), "filter", n)
+				re.log.Debug("filtering message", "topic", rec.Topic, "partition", rec.Partition, "offset", rec.Offset, "filter", n)
 				re.metrics.GetOrCreateCounter(MetricName(MetricFilteredMsgs, Label{"filter", n})).Inc()
 				ok = false
 				break

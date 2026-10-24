@@ -296,7 +296,7 @@ func (sp *SourcePool) newConn(ctx context.Context, s Server) (*kgo.Client, error
 	}
 
 	sp.log.Debug("initiazing new source consumer", "id", s.ID, "server", s.Config.BootstrapBrokers)
-	cl, err := sp.initConsumer(s.Config)
+	cl, err := sp.initConsumer(ctx, s.Config)
 	if err != nil {
 		sp.log.Error("error initiazing source consumer", "id", s.ID, "server", s.Config.BootstrapBrokers)
 		return nil, err
@@ -453,7 +453,7 @@ func (sp *SourcePool) checkServers(ctx context.Context, servers []Server, client
 }
 
 // initConsumer initializes a Kafka consumer client. This is used for creating consumer connection to source servers.
-func (sp *SourcePool) initConsumer(cfg ConsumerCfg) (*kgo.Client, error) {
+func (sp *SourcePool) initConsumer(ctx context.Context, cfg ConsumerCfg) (*kgo.Client, error) {
 	// Convert int64 offsets to kgo.Offset for ConsumePartitions.
 	cp := make(map[int32]kgo.Offset)
 	for p, o := range sp.targetOffsets {
@@ -500,7 +500,7 @@ func (sp *SourcePool) initConsumer(cfg ConsumerCfg) (*kgo.Client, error) {
 		return nil, err
 	}
 
-	if err := ValidateConn(cl, cfg.SessionTimeout, []string{sp.topic.SourceTopic}, nil); err != nil {
+	if err := ValidateConn(ctx, cl, cfg.SessionTimeout, []string{sp.topic.SourceTopic}, nil); err != nil {
 		cl.Close()
 		return nil, err
 	}

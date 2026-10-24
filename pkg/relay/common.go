@@ -139,12 +139,12 @@ func GetAckPolicy(ack string) kgo.Acks {
 
 // ValidateConn tests if the connection is active and confirms the existence of topics
 // (and optionally, specific partitions).
-func ValidateConn(client *kgo.Client, timeout time.Duration, topics []string, partitions map[string]uint) error {
+func ValidateConn(parent context.Context, client *kgo.Client, timeout time.Duration, topics []string, partitions map[string]uint) error {
 	if timeout == 0 {
 		timeout = 15 * time.Second
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	ctx, cancel := context.WithTimeout(parent, timeout)
 	defer cancel()
 
 	req := kmsg.NewPtrMetadataRequest()
