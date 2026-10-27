@@ -219,7 +219,11 @@ loop:
 				sp.metr.nodes[s.ID].connections.Inc()
 
 				// Lock because sp.cancelFetch could be accessed by healthcheck() goroutine.
+				// The previous fetch context is cancelled so it isn't left attached to globalCtx.
 				sp.Lock()
+				if sp.cancelFetch != nil {
+					sp.cancelFetch()
+				}
 				sp.fetchCtx, sp.cancelFetch = context.WithCancel(globalCtx)
 				sp.Unlock()
 				return &out, nil
@@ -503,6 +507,25 @@ func (sp *SourcePool) initConsumer(cfg ConsumerCfg) (*kgo.Client, error) {
 	if err := ValidateConn(cl, cfg.SessionTimeout, []string{sp.topic.SourceTopic}, nil); err != nil {
 		cl.Close()
 		return nil, err
+	}
+
+	// Consume source partitions the target has no offset for from the start, so a fresh
+	// target or a partition it hasn't written to yet isn't skipped.
+	listed, err := sp.GetHighWatermark(context.Background(), cl)
+	if err != nil {
+		cl.Close()
+		return nil, err
+	}
+
+	missing := make(map[int32]kgo.Offset)
+	listed.Each(func(lo kadm.ListedOffset) {
+		if _, ok := sp.targetOffsets[lo.Partition]; !ok {
+			missing[lo.Partition] = kgo.NewOffset().AtStart()
+		}
+	})
+	if len(missing) > 0 {
+		sp.log.Info("consuming partitions without a target offset from the start", "partitions", missing)
+		cl.AddConsumePartitions(map[string]map[int32]kgo.Offset{sp.topic.SourceTopic: missing})
 	}
 
 	return cl, nil

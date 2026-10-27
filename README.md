@@ -145,8 +145,8 @@ func (r *RedisTarget) Write(ctx context.Context, msg relay.Message) error {
 		},
 	})
 
-	// Persist the source offset for GetHighWatermark() (for relay resumption).
-	pipe.HSet(ctx, watermarkKey, fmt.Sprintf("%d", msg.Partition), msg.Offset)
+	// Persist the next source offset to consume for GetHighWatermark() (for relay resumption).
+	pipe.HSet(ctx, watermarkKey, fmt.Sprintf("%d", msg.SourcePartition), msg.Offset+1)
 
 	_, err := pipe.Exec(ctx)
 	return err
@@ -165,7 +165,10 @@ Connect it to the relay.
 ```go
 target := NewRedisTarget("localhost:6379", "my-stream", log)
 
-srcPool, _ := relay.NewSourcePool(poolCfg, consumerCfgs, topic, nil, metricsSet, log)
+// Resume from the offsets the target has stored.
+offsets, _ := target.GetHighWatermark(ctx)
+
+srcPool, _ := relay.NewSourcePool(poolCfg, consumerCfgs, topic, offsets["my-stream"], metricsSet, log)
 
 r, _ := relay.NewRelay(relayCfg, srcPool, target, topic, nil, metricsSet, log)
 r.Start(ctx)

@@ -113,6 +113,29 @@ func (tg *Target) GetHighWatermark(ctx context.Context) (relay.Offsets, error) {
 	return out, nil
 }
 
+var _ relay.PartitionCounter = (*Target)(nil)
+
+// PartitionCount returns the number of partitions of the given target topic.
+func (tg *Target) PartitionCount(ctx context.Context, topic string) (int, error) {
+	ctx, cancel := context.WithTimeout(ctx, tg.cfg.ReqTimeout)
+	defer cancel()
+
+	topics, err := kadm.NewClient(tg.client).ListTopics(ctx, topic)
+	if err != nil {
+		return 0, err
+	}
+
+	t, ok := topics[topic]
+	if !ok {
+		return 0, fmt.Errorf("topic %s not found", topic)
+	}
+	if t.Err != nil {
+		return 0, t.Err
+	}
+
+	return len(t.Partitions), nil
+}
+
 // Start runs the blocking batch/flush loop.
 // It reads messages from the internal channel, batches them, and flushes
 // to Kafka periodically or when the batch is full.
@@ -172,15 +195,18 @@ func (tg *Target) Start() error {
 // Write converts a relay.Message to a kgo.Record and enqueues it for production.
 // Blocks if the internal buffer is full.
 func (tg *Target) Write(ctx context.Context, msg relay.Message) error {
-	rec := &kgo.Record{
-		Key:   msg.Key,
-		Value: msg.Value,
-		Topic: msg.Topic,
+	// The client uses a manual partitioner, so the record goes to exactly this partition.
+	partition := msg.Partition
+	if partition == relay.SourcePartition {
+		partition = msg.SourcePartition
 	}
 
-	// -1 means auto-partition (let the partitioner decide).
-	if msg.Partition >= 0 {
-		rec.Partition = msg.Partition
+	rec := &kgo.Record{
+		Key:       msg.Key,
+		Value:     msg.Value,
+		Topic:     msg.Topic,
+		Partition: partition,
+		Headers:   make([]kgo.RecordHeader, 0, len(msg.Headers)),
 	}
 
 	for _, h := range msg.Headers {
@@ -215,15 +241,16 @@ func (tg *Target) Write(ctx context.Context, msg relay.Message) error {
 func (tg *Target) Close() error {
 	tg.closeOnce.Do(func() {
 		close(tg.inletCh)
+
+		// Wait for Start() to finish draining.
+		<-tg.doneCh
+
+		if tg.client != nil {
+			// Purge first so closing doesn't block on undelivered records.
+			tg.client.PurgeTopicsFromProducing()
+			tg.client.Close()
+		}
 	})
-
-	// Wait for Start() to finish draining.
-	<-tg.doneCh
-
-	if tg.client != nil {
-		// Prevent blocking on close.
-		tg.client.PurgeTopicsFromProducing()
-	}
 	return nil
 }
 

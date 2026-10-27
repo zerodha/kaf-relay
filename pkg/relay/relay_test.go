@@ -1,419 +1,252 @@
-package relay
+package relay_test
 
 import (
-	"bytes"
 	"context"
+	"errors"
 	"fmt"
+	"io"
+	"log/slog"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/VictoriaMetrics/metrics"
 	"github.com/twmb/franz-go/pkg/kfake"
 	"github.com/twmb/franz-go/pkg/kgo"
-	"github.com/twmb/franz-go/pkg/kmsg"
+	"github.com/zerodha/kaf-relay/pkg/kafkatarget"
+	"github.com/zerodha/kaf-relay/pkg/relay"
 )
 
-type Cluster struct {
-	brokers *kfake.Cluster
-	pClient *kgo.Client
-	cClient *kgo.Client
+var testLog = slog.New(slog.NewTextHandler(io.Discard, nil))
+
+// newCluster starts an in-memory Kafka cluster with a topic of the given partitions.
+func newCluster(t *testing.T, topic string, partitions int32) *kfake.Cluster {
+	t.Helper()
+
+	c, err := kfake.NewCluster(kfake.NumBrokers(1), kfake.SeedTopics(partitions, topic))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(c.Close)
+	return c
 }
 
-func NewCluster(port int) (*Cluster, error) {
-	// Setup kafka cluster
-	c, err := kfake.NewCluster(
-		kfake.Ports(port),
+// produce writes one message per value to the given partition.
+func produce(t *testing.T, c *kfake.Cluster, topic string, partition int32, values ...string) {
+	t.Helper()
+
+	cl, err := kgo.NewClient(kgo.SeedBrokers(c.ListenAddrs()...), kgo.RecordPartitioner(kgo.ManualPartitioner()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cl.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	for _, v := range values {
+		rec := &kgo.Record{Topic: topic, Partition: partition, Value: []byte(v)}
+		if err := cl.ProduceSync(ctx, rec).FirstErr(); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// newRelay wires a relay from the sources into the target, resuming from the target's
+// high watermark like main.go does.
+func newRelay(t *testing.T, sources []*kfake.Cluster, target relay.Target, tp relay.Topic) *relay.Relay {
+	t.Helper()
+
+	hw, err := target.GetHighWatermark(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var cfgs []relay.ConsumerCfg
+	for _, s := range sources {
+		cfgs = append(cfgs, relay.ConsumerCfg{KafkaCfg: relay.KafkaCfg{BootstrapBrokers: s.ListenAddrs(), SessionTimeout: time.Second}})
+	}
+
+	m := metrics.NewSet()
+	pool, err := relay.NewSourcePool(relay.SourcePoolCfg{
+		HealthCheckInterval: 100 * time.Millisecond,
+		ReqTimeout:          time.Second,
+		LagThreshold:        100,
+		MaxRetries:          relay.IndefiniteRetry,
+	}, cfgs, tp, hw[tp.TargetTopic], m, testLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	r, err := relay.NewRelay(relay.RelayCfg{}, pool, target, tp, nil, m, testLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return r
+}
+
+// newKafkaTarget returns a Kafka target producing to c.
+func newKafkaTarget(t *testing.T, c *kfake.Cluster, tp relay.Topic) *kafkatarget.Target {
+	t.Helper()
+
+	target, err := kafkatarget.New(context.Background(), relay.TargetCfg{ReqTimeout: time.Second}, relay.ProducerCfg{
+		KafkaCfg:        relay.KafkaCfg{BootstrapBrokers: c.ListenAddrs(), SessionTimeout: 5 * time.Second},
+		MaxRetries:      relay.IndefiniteRetry,
+		FlushFrequency:  50 * time.Millisecond,
+		MaxMessageBytes: 1 << 20,
+		BatchSize:       100,
+		BufferSize:      100,
+		FlushBatchSize:  100,
+	}, relay.Topics{tp.SourceTopic: tp}, metrics.NewSet(), testLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return target
+}
+
+// startRelay runs a relay until the test ends, or until the returned func is called.
+func startRelay(t *testing.T, sources []*kfake.Cluster, target relay.Target, tp relay.Topic) func() {
+	t.Helper()
+
+	r := newRelay(t, sources, target, tp)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- r.Start(ctx) }()
+
+	var once sync.Once
+	stop := func() {
+		once.Do(func() {
+			cancel()
+			if err := <-done; err != nil {
+				t.Error(err)
+			}
+		})
+	}
+	t.Cleanup(stop)
+	return stop
+}
+
+// waitFor polls until cond holds, then waits a little longer so duplicates can show up.
+func waitFor(t *testing.T, cond func() bool) {
+	t.Helper()
+
+	deadline := time.Now().Add(15 * time.Second)
+	for !cond() {
+		if time.Now().After(deadline) {
+			t.Fatal("timed out waiting for messages")
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	time.Sleep(500 * time.Millisecond)
+}
+
+func values(prefix string, n int) []string {
+	out := make([]string, n)
+	for i := range out {
+		out[i] = fmt.Sprintf("%s-%d", prefix, i)
+	}
+	return out
+}
+
+// received consumes the topic on c and returns the values seen so far per partition.
+func received(t *testing.T, c *kfake.Cluster, topic string) func() map[int32][]string {
+	t.Helper()
+
+	cl, err := kgo.NewClient(kgo.SeedBrokers(c.ListenAddrs()...), kgo.ConsumeTopics(topic), kgo.FetchMaxWait(100*time.Millisecond))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var (
+		mu   sync.Mutex
+		msgs = map[int32][]string{}
+		done = make(chan struct{})
 	)
-	if err != nil {
-		return nil, fmt.Errorf("error starting kfake cluster: %v", err)
-	}
-	return &Cluster{
-		brokers: c,
-	}, nil
-}
-
-func (c *Cluster) AddProducer(addrs []string) error {
-	opts := []kgo.Opt{
-		kgo.ProduceRequestTimeout(time.Second),
-		kgo.RecordDeliveryTimeout(7 * time.Second),
-		kgo.SeedBrokers(addrs...),
-	}
-
-	cl, err := kgo.NewClient(opts...)
-	if err != nil {
-		return err
-	}
-
-	c.pClient = cl
-	return nil
-}
-
-func (c *Cluster) AddConsumer(topic string, addrs []string) error {
-	opts := []kgo.Opt{
-		kgo.ConsumeTopics(topic),
-		kgo.SeedBrokers(addrs...),
-		kgo.FetchMaxWait(time.Second),
-	}
-
-	cl, err := kgo.NewClient(opts...)
-	if err != nil {
-		return err
-	}
-
-	c.cClient = cl
-	return nil
-}
-
-func (c *Cluster) Close() {
-	if c.cClient != nil {
-		c.cClient.Close()
-	}
-	if c.pClient != nil {
-		c.pClient.Close()
-	}
-
-	c.brokers.Close()
-}
-
-func (c *Cluster) CreateTopic(topic string) error {
-	req := kmsg.NewCreateTopicsRequest()
-	rt := kmsg.NewCreateTopicsRequestTopic()
-	rt.ReplicationFactor = -1
-	rt.Topic = topic
-	rt.NumPartitions = 1
-	req.Topics = append(req.Topics, rt)
-
-	if _, err := req.RequestWith(context.TODO(), c.pClient); err != nil {
-		return err
-	}
-	return nil
-}
-
-func (c *Cluster) DeleteTopic(topic string) error {
-	req := kmsg.NewDeleteTopicsRequest()
-	rt := kmsg.NewDeleteTopicsRequestTopic()
-	rt.Topic = &topic
-	req.Topics = append(req.Topics, rt)
-
-	if _, err := req.RequestWith(context.TODO(), c.pClient); err != nil {
-		return err
-	}
-	return nil
-}
-
-func (c *Cluster) Produce(topic, key, val string) error {
-	res := c.pClient.ProduceSync(context.TODO(), &kgo.Record{
-		Topic: topic,
-		Key:   []byte(key),
-		Value: []byte(val),
-	})
-
-	return res.FirstErr()
-}
-
-// Helper function to verify messages on target
-func verifyTargetMessage(t *testing.T, target *Cluster, expectedValue string, timeout time.Duration) {
-	msgCh := make(chan []byte, 1)
-	errCh := make(chan error, 1)
-
 	go func() {
-		fetches := target.cClient.PollFetches(context.TODO())
-		if fetches.IsClientClosed() {
-			errCh <- fmt.Errorf("client closed")
-			return
-		}
-
-		for _, err := range fetches.Errors() {
-			errCh <- err.Err
-			return
-		}
-
-		iter := fetches.RecordIter()
-		for !iter.Done() {
-			rec := iter.Next()
-			msgCh <- rec.Value
+		defer close(done)
+		for {
+			fetches := cl.PollFetches(context.Background())
+			if fetches.IsClientClosed() {
+				return
+			}
+			mu.Lock()
+			fetches.EachRecord(func(r *kgo.Record) {
+				msgs[r.Partition] = append(msgs[r.Partition], string(r.Value))
+			})
+			mu.Unlock()
 		}
 	}()
+	t.Cleanup(func() {
+		cl.Close()
+		<-done
+	})
 
-	select {
-	case msg := <-msgCh:
-		t.Logf("received msg on target: %s", string(msg))
-		if !bytes.Equal(msg, []byte(expectedValue)) {
-			t.Fatalf("expected value %s, got %s", expectedValue, string(msg))
+	return func() map[int32][]string {
+		mu.Lock()
+		defer mu.Unlock()
+
+		out := make(map[int32][]string, len(msgs))
+		for p, v := range msgs {
+			out[p] = append([]string(nil), v...)
 		}
-	case err := <-errCh:
-		t.Fatalf("error consuming from target: %v", err)
-	case <-time.After(timeout):
-		t.Fatal("timeout waiting for message")
+		return out
 	}
 }
 
-// Helper function to produce identical messages to both sources
-func produceToAll(t *testing.T, topic, key, value string, sources ...*Cluster) {
-	for _, src := range sources {
-		if err := src.Produce(topic, key, value); err != nil {
-			t.Logf("failed to produce to %v: %v", src, err)
-		}
+func count(m map[int32][]string) int {
+	n := 0
+	for _, v := range m {
+		n += len(v)
 	}
-}
-
-// TestConfig holds test configuration for multiple clusters
-type TestConfig struct {
-	Cluster1Addrs []string
-	Cluster2Addrs []string
-	Cluster3Addrs []string
-	SourceTopic   string
-	TargetTopic   string
+	return n
 }
 
 func TestKafkaRelay(t *testing.T) {
-	cfg := TestConfig{
-		Cluster1Addrs: []string{"localhost:9091"},
-		Cluster2Addrs: []string{"localhost:9092"},
-		Cluster3Addrs: []string{"localhost:9093"},
-		SourceTopic:   "xyz",
-		TargetTopic:   "xyz2",
+	const topic = "orders"
+	src1, src2 := newCluster(t, topic, 3), newCluster(t, topic, 3)
+	dst := newCluster(t, topic, 3)
+
+	tp := relay.Topic{SourceTopic: topic, TargetTopic: topic, AutoTargetPartition: true}
+	target := newKafkaTarget(t, dst, tp)
+
+	got := received(t, dst, topic)
+	startRelay(t, []*kfake.Cluster{src1, src2}, target, tp)
+
+	// Both sources carry the same stream, so each message is relayed once.
+	want := map[int32][]string{0: values("a0", 2), 1: values("a1", 3), 2: values("a2", 1)}
+	for p, v := range want {
+		produce(t, src1, topic, p, v...)
+		produce(t, src2, topic, p, v...)
 	}
+	waitFor(t, func() bool { return count(got()) >= 6 })
 
-	src1, err := NewCluster(9091)
-	if err != nil {
-		t.Fatal(err)
+	// Take the first source down. The relay fails over to the second and continues
+	// from where it left off.
+	src1.Close()
+	for p, v := range map[int32][]string{0: values("b0", 2), 2: values("b2", 2)} {
+		produce(t, src2, topic, p, v...)
+		want[p] = append(want[p], v...)
 	}
-	src2, err := NewCluster(9092)
-	if err != nil {
-		t.Fatal(err)
+	waitFor(t, func() bool { return count(got()) >= 10 })
+
+	if g := got(); fmt.Sprint(g) != fmt.Sprint(want) {
+		t.Fatalf("target partitions = %v, want %v", g, want)
 	}
-	target, err := NewCluster(9093)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	// Setup clusters
-	for _, setup := range []struct {
-		cluster *Cluster
-		addrs   []string
-	}{
-		{src1, cfg.Cluster1Addrs},
-		{src2, cfg.Cluster2Addrs},
-		{target, cfg.Cluster3Addrs},
-	} {
-		if err := setup.cluster.AddProducer(setup.addrs); err != nil {
-			t.Fatal(err)
-		}
-	}
-
-	if err := target.AddConsumer(cfg.TargetTopic, cfg.Cluster3Addrs); err != nil {
-		t.Fatal(err)
-	}
-
-	// Create topics
-	for _, c := range []*Cluster{src1, src2} {
-		if err := c.CreateTopic(cfg.SourceTopic); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if err := target.CreateTopic(cfg.TargetTopic); err != nil {
-		t.Fatal(err)
-	}
-
-	time.Sleep(time.Second * 3)
-
-	// Test cases
-	t.Run("normal-operation", func(t *testing.T) {
-		// Write a msg on src 1, so that it is elected as a candidate first
-		if err := src1.Produce(cfg.SourceTopic, "key1", "value1"); err != nil {
-			t.Fatal(err)
-		}
-		verifyTargetMessage(t, target, "value1", 10*time.Second)
-	})
-
-	t.Run("failover-scenario", func(t *testing.T) {
-		// Simulate cluster 1 failure by taking it down
-		src1.Close()
-
-		// Add two messages on cluster 2
-		if err := src2.Produce(cfg.SourceTopic, "key1", "value1"); err != nil {
-			t.Fatal(err)
-		}
-		if err := src2.Produce(cfg.SourceTopic, "key2", "value2"); err != nil {
-			t.Fatal(err)
-		}
-
-		verifyTargetMessage(t, target, "value2", 10*time.Second)
-	})
 }
 
-// func TestKafkaRelayRandomScenarios(t *testing.T) {
-// 	cfg := TestConfig{
-// 		Cluster1Addrs: []string{"localhost:9091"},
-// 		Cluster2Addrs: []string{"localhost:9092"},
-// 		Cluster3Addrs: []string{"localhost:9093"},
-// 		SourceTopic:   "xyz",
-// 		TargetTopic:   "xyz2",
-// 	}
+func TestKafkaRelayPartitionCountMismatch(t *testing.T) {
+	const topic = "orders"
+	src, dst := newCluster(t, topic, 3), newCluster(t, topic, 1)
 
-// 	src1, err := NewCluster(9091)
-// 	if err != nil {
-// 		t.Fatal(err)
-// 	}
-// 	src2, err := NewCluster(9092)
-// 	if err != nil {
-// 		t.Fatal(err)
-// 	}
-// 	target, err := NewCluster(9093)
-// 	if err != nil {
-// 		t.Fatal(err)
-// 	}
+	tp := relay.Topic{SourceTopic: topic, TargetTopic: topic, AutoTargetPartition: true}
+	target := newKafkaTarget(t, dst, tp)
+	produce(t, src, topic, 0, "a")
 
-// 	// Setup clusters
-// 	for _, setup := range []struct {
-// 		cluster *Cluster
-// 		addrs   []string
-// 	}{
-// 		{src1, cfg.Cluster1Addrs},
-// 		{src2, cfg.Cluster2Addrs},
-// 		{target, cfg.Cluster3Addrs},
-// 	} {
-// 		if err := setup.cluster.AddProducer(setup.addrs); err != nil {
-// 			t.Fatal(err)
-// 		}
-// 	}
+	r := newRelay(t, []*kfake.Cluster{src}, target, tp)
 
-// 	if err := target.AddConsumer(cfg.TargetTopic, cfg.Cluster3Addrs); err != nil {
-// 		t.Fatal(err)
-// 	}
-
-// 	// Create topics
-// 	for _, c := range []*Cluster{src1, src2} {
-// 		if err := c.CreateTopic(cfg.SourceTopic); err != nil {
-// 			t.Fatal(err)
-// 		}
-// 	}
-// 	if err := target.CreateTopic(cfg.TargetTopic); err != nil {
-// 		t.Fatal(err)
-// 	}
-
-// 	time.Sleep(time.Second * 4)
-
-// 	// t.Run("alternating-source-writes", func(t *testing.T) {
-// 	// 	messages := []struct {
-// 	// 		key, value string
-// 	// 	}{
-// 	// 		{"msg1", "value1"},
-// 	// 		{"msg2", "value2"},
-// 	// 		{"msg3", "value3"},
-// 	// 	}
-
-// 	// 	for i, msg := range messages {
-// 	// 		// Alternate between sources for each message
-// 	// 		if i%2 == 0 {
-// 	// 			produceToAll(t, cfg.SourceTopic, msg.key, msg.value, src1)
-// 	// 		} else {
-// 	// 			produceToAll(t, cfg.SourceTopic, msg.key, msg.value, src2)
-// 	// 		}
-
-// 	// 		// Verify message appears exactly once on target
-// 	// 		verifyTargetMessage(t, target, msg.value, 10*time.Second)
-// 	// 	}
-// 	// })
-
-// 	t.Run("rapid-source-switching", func(t *testing.T) {
-// 		// Start with both sources up
-// 		src1.Close()
-// 		src1, err = NewCluster(9091)
-// 		if err != nil {
-// 			t.Fatal(err)
-// 		}
-// 		if err := src1.AddProducer(cfg.Cluster1Addrs); err != nil {
-// 			t.Fatal(err)
-// 		}
-
-// 		src2.Close()
-// 		src2, err = NewCluster(9092)
-// 		if err != nil {
-// 			t.Fatal(err)
-// 		}
-// 		if err := src2.AddProducer(cfg.Cluster2Addrs); err != nil {
-// 			t.Fatal(err)
-// 		}
-
-// 		// Write sequence of messages while rapidly switching sources
-// 		sequence := []struct {
-// 			key, value string
-// 			action     func()
-// 		}{
-// 			{"k1", "v1", func() { src2.Close() }},               // Write to src1, take down src2
-// 			{"k2", "v2", func() { src1.Close() }},               // Write to both, take down src1
-// 			{"k3", "v3", func() { /* both down */ }},            // No writes possible
-// 			{"k4", "v4", func() { src2, _ = NewCluster(9092) }}, // Bring up src2
-// 			{"k5", "v5", func() { src1, _ = NewCluster(9091) }}, // Bring up src1
-// 			{"k6", "v6", func() { src1.Close(); src2.Close() }}, // Take both down
-// 			{"k7", "v7", func() { src1, _ = NewCluster(9091) }}, // Bring up src1
-// 		}
-
-// 		for _, step := range sequence {
-// 			// Try to produce to both sources (some will fail depending on state)
-// 			if src1 != nil {
-// 				_ = src1.Produce(cfg.SourceTopic, step.key, step.value)
-// 			}
-// 			if src2 != nil {
-// 				_ = src2.Produce(cfg.SourceTopic, step.key, step.value)
-// 			}
-
-// 			// Execute the state change action
-// 			step.action()
-// 			time.Sleep(time.Second) // Allow time for state change
-
-// 			// Only verify messages that should have made it through
-// 			if src1 != nil || src2 != nil {
-// 				verifyTargetMessage(t, target, step.value, 10*time.Second)
-// 			}
-// 		}
-// 	})
-
-// 	// t.Run("concurrent-identical-messages", func(t *testing.T) {
-// 	// 	// Ensure both sources are up
-// 	// 	if src1 != nil {
-// 	// 		src1.Close()
-// 	// 	}
-// 	// 	if src2 != nil {
-// 	// 		src2.Close()
-// 	// 	}
-
-// 	// 	src1, _ = NewCluster(9091)
-// 	// 	src2, _ = NewCluster(9092)
-// 	// 	if err := src1.AddProducer(cfg.Cluster1Addrs); err != nil {
-// 	// 		t.Fatal(err)
-// 	// 	}
-// 	// 	if err := src2.AddProducer(cfg.Cluster2Addrs); err != nil {
-// 	// 		t.Fatal(err)
-// 	// 	}
-
-// 	// 	// Write identical messages to both sources concurrently
-// 	// 	var wg sync.WaitGroup
-// 	// 	messages := []struct {
-// 	// 		key, value string
-// 	// 	}{
-// 	// 		{"concurrent1", "value1"},
-// 	// 		{"concurrent2", "value2"},
-// 	// 		{"concurrent3", "value3"},
-// 	// 	}
-
-// 	// 	for _, msg := range messages {
-// 	// 		wg.Add(2)
-// 	// 		go func(k, v string) {
-// 	// 			defer wg.Done()
-// 	// 			_ = src1.Produce(cfg.SourceTopic, k, v)
-// 	// 		}(msg.key, msg.value)
-
-// 	// 		go func(k, v string) {
-// 	// 			defer wg.Done()
-// 	// 			_ = src2.Produce(cfg.SourceTopic, k, v)
-// 	// 		}(msg.key, msg.value)
-
-// 	// 		wg.Wait()
-
-// 	// 		// Verify message appears exactly once on target
-// 	// 		verifyTargetMessage(t, target, msg.value, 10*time.Second)
-// 	// 	}
-// 	// })
-// }
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	if err := r.Start(ctx); !errors.Is(err, relay.ErrPartitionCountMismatch) {
+		t.Fatalf("Start() = %v, want ErrPartitionCountMismatch", err)
+	}
+}
